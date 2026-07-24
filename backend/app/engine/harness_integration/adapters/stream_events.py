@@ -163,10 +163,15 @@ async def stream_events_to_app_events(
                 content = str(output.content)
             else:
                 content = str(output)
+            # 检查 ToolMessage 的 status：tool_wrapper 把 ToolException 转成
+            # status="error" 的 ToolMessage 回传 LLM。这里同步透传给前端，
+            # 让前端能结构化区分工具成功/失败，不再靠正则嗅探文本。
+            status = "error" if getattr(output, "status", None) == "error" else "success"
             await on_event(
                 ToolResultEvent(
                     tool_name=tool_name,
                     content=content,
+                    status=status,
                 )
             )
 

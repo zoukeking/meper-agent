@@ -11,6 +11,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_core.messages import ToolMessage
+
 from app.engine.harness_integration.adapters.stream_events import (
     _extract_interrupt,
     _extract_text_content,
@@ -161,6 +163,56 @@ async def test_tool_result_from_tool_end():
     events = [{"event": "on_tool_end", "name": "write", "data": {"output": _ToolMessage(content="done")}}]
     emitted = await _run(events)
     assert {"type": "tool_result", "tool_name": "write", "content": "done", "status": "success"} in emitted
+
+
+async def _collect_tool_end_events(tool_message: ToolMessage) -> list[Any]:
+    """Helper: 模拟一个 on_tool_end 事件，收集发出的 AppEvent。"""
+    events: list[Any] = []
+
+    async def on_event(evt: Any) -> None:
+        events.append(evt)
+
+    fake_event = {
+        "event": "on_tool_end",
+        "name": "mcp__github__create_issue",
+        "data": {"output": tool_message},
+    }
+
+    async def _aiter():
+        yield fake_event
+
+    await stream_events_to_app_events(_aiter(), on_event)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_tool_end_error_status_propagated():
+    """ToolMessage(status=error) 应产生 status=error 的 ToolResultEvent。"""
+    error_msg = ToolMessage(
+        content="Error executing tool: permission denied",
+        name="mcp__github__create_issue",
+        tool_call_id="call_1",
+        status="error",
+    )
+    events = await _collect_tool_end_events(error_msg)
+    tool_results = [e for e in events if getattr(e, "type", None) == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0].status == "error"
+    assert "permission denied" in tool_results[0].content
+
+
+@pytest.mark.asyncio
+async def test_tool_end_success_status_default():
+    """正常 ToolMessage 应产生 status=success 的 ToolResultEvent。"""
+    ok_msg = ToolMessage(
+        content="issue created #42",
+        name="mcp__github__create_issue",
+        tool_call_id="call_1",
+    )
+    events = await _collect_tool_end_events(ok_msg)
+    tool_results = [e for e in events if getattr(e, "type", None) == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0].status == "success"
 
 
 @pytest.mark.asyncio
