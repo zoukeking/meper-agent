@@ -185,7 +185,17 @@ class AgentExecutionService:
                 run_error = exc
                 logger.error("agent_stream_error", agent_id=agent_id, request_id=request_id, error=str(exc))
                 logger.exception("agent_stream_error_traceback")
-                await event_queue.put(f"data: {safe_json({'type': 'error', 'content': str(exc)})}\n\n")
+                # 走 ErrorEvent schema 保留 source 字段，前端可据此区分
+                # 错误来源（llm/tool/graph），不再丢字段。
+                from app.engine.harness_integration.adapters.app_event import ErrorEvent
+
+                err_evt = ErrorEvent(
+                    message=str(exc),
+                    source=_classify_error_source(exc),
+                ).model_dump()
+                # 前端契约用 content，ErrorEvent 用 message，做字段重映射
+                err_evt["content"] = err_evt.pop("message", "")
+                await event_queue.put(f"data: {safe_json(err_evt)}\n\n")
                 result = {}
             finally:
                 await _persist_agent_message(
@@ -258,7 +268,14 @@ class AgentExecutionService:
                 run_error = exc
                 logger.error("agent_resume_error", agent_id=agent_id, error=str(exc))
                 logger.exception("agent_resume_error_traceback")
-                await event_queue.put(f"data: {safe_json({'type': 'error', 'content': str(exc)})}\n\n")
+                from app.engine.harness_integration.adapters.app_event import ErrorEvent
+
+                err_evt = ErrorEvent(
+                    message=str(exc),
+                    source=_classify_error_source(exc),
+                ).model_dump()
+                err_evt["content"] = err_evt.pop("message", "")
+                await event_queue.put(f"data: {safe_json(err_evt)}\n\n")
                 result = {}
             finally:
                 await _persist_agent_message(
@@ -377,6 +394,42 @@ def _build_initial_state(
         "session_id": session_id,
         "user_id": user_id,
     }
+
+
+# LLM 类异常的类型名关键词（主流 LLM 库：openai / anthropic / 通义等）。
+# 这些异常在模型欠费、限流、超时、鉴权失败时抛出。
+_LLM_ERROR_TYPE_KEYWORDS = (
+    "ratelimit", "rate_limit", "apitimeout", "authentication",
+    "permissiondenied", "insufficient_quota", "quotaexceeded",
+    "connection", "timeout",
+)
+# 错误消息中的 LLM 类关键词。
+_LLM_ERROR_MSG_KEYWORDS = (
+    "rate limit", "quota", "insufficient_quota", "余额不足", "欠费",
+    "api key", "invalid_api_key", "authentication",
+    "model_not_found", "context_length_exceeded",
+)
+
+
+def _classify_error_source(exc: BaseException) -> str:
+    """根据异常类型/消息判定错误来源，供前端区分展示。
+
+    返回 "llm"（模型欠费/限流/超时/鉴权）、"tool"（工具加载/配置错误）、
+    或 "graph"（其余含服务端内部异常）。
+
+    注意：按"所有错误都暴露给前端"的原则，这里只分类来源，不脱敏——
+    顶层异常的 str(exc) 会原样发给前端。
+    """
+    type_name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+
+    # LLM 类异常：匹配类型名或消息关键词
+    if any(kw in type_name for kw in _LLM_ERROR_TYPE_KEYWORDS):
+        return "llm"
+    if any(kw in msg for kw in _LLM_ERROR_MSG_KEYWORDS):
+        return "llm"
+
+    return "graph"
 
 
 async def _persist_agent_message(
