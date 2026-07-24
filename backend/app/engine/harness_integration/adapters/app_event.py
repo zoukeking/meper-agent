@@ -84,6 +84,7 @@ class ToolResultEvent(_Base):
     type: Literal["tool_result"] = "tool_result"
     tool_name: str
     content: str
+    status: Literal["success", "error"] = "success"
 
 
 class InterruptEvent(_Base):

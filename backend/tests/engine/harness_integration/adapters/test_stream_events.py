@@ -160,7 +160,7 @@ async def test_tool_result_from_tool_end():
     """on_tool_end → tool_result event."""
     events = [{"event": "on_tool_end", "name": "write", "data": {"output": _ToolMessage(content="done")}}]
     emitted = await _run(events)
-    assert {"type": "tool_result", "tool_name": "write", "content": "done"} in emitted
+    assert {"type": "tool_result", "tool_name": "write", "content": "done", "status": "success"} in emitted
 
 
 @pytest.mark.asyncio
