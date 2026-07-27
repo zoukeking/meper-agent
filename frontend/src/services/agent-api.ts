@@ -164,6 +164,7 @@ export interface ToolResultEvent {
   type: 'tool_result'
   tool_name: string
   content: string
+  status?: 'success' | 'error'
 }
 
 /** Incremental text delta streamed from the LLM */

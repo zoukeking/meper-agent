@@ -847,7 +847,7 @@ export default function ChatPanel({
                     for (let i = tl.length - 1; i >= 0; i--) {
                       const entry = tl[i]
                       if (entry.type === 'tool' && entry.toolName === e.tool_name && entry.toolStatus === 'running') {
-                        const isError = e.content?.startsWith('Error')
+                        const isError = e.status === 'error'
                         tl[i] = { ...entry, result: e.content, toolStatus: isError ? 'error' : 'success' }
                         updated = true
                         break
@@ -865,7 +865,7 @@ export default function ChatPanel({
                       for (let i = tl.length - 1; i >= 0; i--) {
                         const entry = tl[i]
                         if (entry.type === 'tool' && entry.toolName === e.tool_name && entry.toolStatus === 'running') {
-                          const isError = e.content?.startsWith('Error')
+                          const isError = e.status === 'error'
                           tl[i] = { ...entry, result: e.content, toolStatus: isError ? 'error' : 'success' }
                           updated = true
                           break
