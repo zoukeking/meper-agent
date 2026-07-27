@@ -215,7 +215,6 @@ export function McpManagePage() {
     },
     onError: (e, conn) => {
       setTestingId(null);
-      toast.error(`「${conn.name}」测试请求失败：${e instanceof Error ? e.message : '网络错误'}`);
     },
   });
 

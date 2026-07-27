@@ -100,7 +100,6 @@ export function TriggersPage({ onViewTask }: Props) {
     onSuccess: () => {
       invalidate()
     },
-    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : '操作失败'),
   })
 
   const deleteMutation = useMutation({
@@ -109,7 +108,6 @@ export function TriggersPage({ onViewTask }: Props) {
       invalidate()
       toast.success('已删除')
     },
-    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : '删除失败'),
   })
 
   const handleDelete = async (trigger: TriggerConfig) => {

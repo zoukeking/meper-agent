@@ -134,10 +134,8 @@ export function WorkflowTaskCard({ created }: { created: TaskCreated }) {
     onError: (err) => {
       const e = err as { statusCode?: number; message?: string };
       if (e.statusCode === 409) {
-        toast.error('任务状态已变更，正在刷新');
+        // 409 冲突：刷新详情（错误提示由全局 mutations.onError 兜底）
         qc.invalidateQueries({ queryKey: taskKeys.detail(created.task_id) });
-      } else {
-        toast.error(e.message ?? '操作失败');
       }
     },
   });
