@@ -61,10 +61,20 @@ function agentMessageToDisplay(rec: MessageRecord, agentName: string, avatar: st
   // aba1d62: agent 文本存在 timeline 的 type="text" 条目里（不再有顶层 content
   // 字段）；final_answer 是旧名。这里收集起来，在下方渲染为最终回复气泡。
   const textParts: string[] = [];
+  // 历史回填：后端把 error 事件持久化进 timeline（不在 _TRANSIENT_EVENT_TYPES），
+  // 这里收集错误文本，在下方按"主回复气泡 status=error"渲染——与 Task 9 实时流
+  // 的 error 分支（status:'error' + content `❌ ${err}`）行为一致，重载会话时复现
+  // 用户当时看到的错误气泡。TimelineEntryData.type 联合里没有 'error'，用 as string
+  // 收窄避免 TS2367（仅此文件内处理，不改共享类型）。
+  let errText: string | undefined;
   for (const entry of rec.timeline_entries ?? []) {
     if (entry.type === 'text' || entry.type === 'final_answer') {
       const t = (entry.content ?? '').trim();
       if (t) textParts.push(t);
+      continue;
+    }
+    if ((entry.type as string) === 'error') {
+      errText = entry.content || '执行出错';
       continue;
     }
     if (entry.type === 'thinking') {
@@ -150,33 +160,48 @@ function agentMessageToDisplay(rec: MessageRecord, agentName: string, avatar: st
 
   // 最终回复正文：优先取 timeline 的 text 条目（aba1d62 后的存储方式），
   // 旧消息仍带 content 字段时回退使用。
-  const textContent =
-    textParts.join('\n\n').trim() ||
-    (rec.content && rec.content.trim() ? rec.content : '');
-  if (textContent) {
+  // error 优先级最高：实时流遇 error 会用 `❌ ${err}` 覆盖主消息（status='error'），
+  // 历史回填同样让 error 覆盖文本/附件气泡，确保切换会话后看到一致错误态。
+  if (errText) {
     out.push({
       id: rec._id,
       senderName: agentName,
       avatar,
       role: 'agent',
-      content: textContent,
+      status: 'error',
+      content: `❌ ${errText}`,
       timestamp: new Date(rec.created_at).toLocaleString(),
-      attachment: fileRefToAttachment(rec.files?.[0]),
-      attachments: dedupOutput.length > 0 ? dedupOutput : undefined,
       usage: rec.token_usage,
     });
-  } else if (dedupOutput.length > 0) {
-    // 没有最终文本但有产物文件：仍渲染一个携带附件的气泡
-    out.push({
-      id: rec._id,
-      senderName: agentName,
-      avatar,
-      role: 'agent',
-      content: '',
-      timestamp: new Date(rec.created_at).toLocaleString(),
-      attachments: dedupOutput,
-      usage: rec.token_usage,
-    });
+  } else {
+    const textContent =
+      textParts.join('\n\n').trim() ||
+      (rec.content && rec.content.trim() ? rec.content : '');
+    if (textContent) {
+      out.push({
+        id: rec._id,
+        senderName: agentName,
+        avatar,
+        role: 'agent',
+        content: textContent,
+        timestamp: new Date(rec.created_at).toLocaleString(),
+        attachment: fileRefToAttachment(rec.files?.[0]),
+        attachments: dedupOutput.length > 0 ? dedupOutput : undefined,
+        usage: rec.token_usage,
+      });
+    } else if (dedupOutput.length > 0) {
+      // 没有最终文本但有产物文件：仍渲染一个携带附件的气泡
+      out.push({
+        id: rec._id,
+        senderName: agentName,
+        avatar,
+        role: 'agent',
+        content: '',
+        timestamp: new Date(rec.created_at).toLocaleString(),
+        attachments: dedupOutput,
+        usage: rec.token_usage,
+      });
+    }
   }
   return out.length
     ? out
