@@ -178,4 +178,6 @@ export interface StreamEvent {
   context?: string | null
   options?: string[] | null
   interrupt_id?: string
+  status?: 'success' | 'error'
+  source?: 'llm' | 'tool' | 'graph'
 }

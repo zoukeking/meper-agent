@@ -156,6 +156,8 @@ interface AssistantAccumulator {
   tools: Map<string, ToolRun>
   attachments: Map<string, AttachmentView>
   charts: Map<string, string>
+  /** 流内 error 事件记录的错误文本。一旦设置，后续 flush 会保持 error 状态。 */
+  errorText?: string
 }
 
 function isImageName(name: string): boolean {
@@ -309,6 +311,9 @@ export function useChat(
   useEffect(() => revokeUrls, [revokeUrls])
 
   const flush = useCallback((acc: AssistantAccumulator, status: ChatMessage['status'] = 'loading') => {
+    // 流内 error 事件记录了错误文本时，后续 flush 一律保持 error 状态并带上 error 字段，
+    // 避免被循环内的普通 flush（默认 loading）覆盖丢失。
+    const effectiveStatus: ChatMessage['status'] = acc.errorText ? 'error' : status
     const next: ChatMessage = {
       id: acc.id,
       role: 'assistant',
@@ -317,7 +322,8 @@ export function useChat(
       tools: Array.from(acc.tools.values()),
       attachments: Array.from(acc.attachments.values()),
       charts: Array.from(acc.charts.values()),
-      status,
+      status: effectiveStatus,
+      error: acc.errorText,
       createdAt: new Date(),
     }
     setMessages((current) =>
@@ -354,7 +360,7 @@ export function useChat(
               Array.from(acc.tools.values()).find((tool) => tool.status === 'running')?.id ||
               `tool-${acc.tools.size + 1}`
             const current = acc.tools.get(id)
-            const isError = /(^|\b)(error|failed|traceback)(\b|:)/i.test(event.content)
+            const isError = event.status === 'error'
             acc.tools.set(id, {
               id,
               name: current?.name || event.tool_name || 'tool',
@@ -411,7 +417,11 @@ export function useChat(
             onFilesChanged()
             return
           } else if (event.type === 'error') {
-            throw new Error(event.content || 'Agent 执行失败')
+            // 不 throw 中断流：记录错误到当前消息，后续仍可能有事件。
+            // errorText 写入 acc，循环内的后续 flush 会保持 error 状态。
+            const errContent = event.content || 'Agent 执行失败'
+            if (!acc.errorText) acc.errorText = errContent
+            flush(acc)
           }
           flush(acc)
         }
