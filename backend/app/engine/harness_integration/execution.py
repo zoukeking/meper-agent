@@ -34,6 +34,23 @@ def _make_event_callback(on_event):
     return _on_event_dict
 
 
+async def _emit_load_errors(hctx, on_event) -> None:
+    """把 context 收集的工具/MCP 加载失败作为 error 事件发给前端。
+
+    每条 load_error 发一个 ErrorEvent(source="tool")，前端据此知道
+    某个工具因故不可用（如 MCP server 离线、自定义工具构建失败）。
+    """
+    from app.engine.harness_integration.adapters.app_event import ErrorEvent
+
+    callback = _make_event_callback(on_event)
+    for err in hctx.get("load_errors", []):
+        evt = ErrorEvent(
+            message=f"[{err['tool_name']}] {err['error']}",
+            source="tool",
+        )
+        await callback(evt)
+
+
 async def stream(
     agent: dict,
     state: dict,
@@ -53,6 +70,9 @@ async def stream(
     )
     usage_summary: dict = {}
     try:
+        # 先发出工具/MCP 加载失败，让用户尽早知道哪些工具不可用
+        await _emit_load_errors(hctx, on_event)
+
         session_id = state.get("session_id", "")
         graph = build_agent_graph(
             hctx["agent_doc"], checkpointer=get_checkpointer(),
@@ -194,6 +214,9 @@ async def resume(
     )
     usage_summary: dict = {}
     try:
+        # 先发出工具/MCP 加载失败，让用户尽早知道哪些工具不可用
+        await _emit_load_errors(hctx, on_event)
+
         session_id = state.get("session_id", "")
         graph = build_agent_graph(
             hctx["agent_doc"], checkpointer=get_checkpointer(),
