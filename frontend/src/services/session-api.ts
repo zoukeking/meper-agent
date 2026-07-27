@@ -68,6 +68,9 @@ export interface TimelineEntryData {
   content?: string
   tool_name?: string
   args?: Record<string, unknown>
+  /** For tool_result: structured success/error status from backend.
+   *  Frontend uses this instead of sniffing "Error" prefix in content. */
+  status?: 'success' | 'error'
 }
 
 export interface SessionListResponse {

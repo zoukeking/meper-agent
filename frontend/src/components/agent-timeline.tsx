@@ -40,6 +40,9 @@ export interface TimelineEntryData {
   content?: string
   tool_name?: string
   args?: Record<string, unknown>
+  /** For tool_result: structured success/error status from backend.
+   *  Frontend uses this instead of sniffing "Error" prefix in content. */
+  status?: 'success' | 'error'
 }
 
 /* ─── Converter: 后端 entries → UI entries ─── */
@@ -68,7 +71,7 @@ function historyEntryToTimeline(entries: TimelineEntryData[]): TimelineEntry[] {
     } else if (e.type === 'tool_result') {
       const pending = pendingToolCalls.get(e.tool_name ?? '')
       if (pending) {
-        const isError = e.content?.startsWith('Error')
+        const isError = e.status === 'error'
         result[pending.idx] = {
           ...pending.entry,
           result: e.content,

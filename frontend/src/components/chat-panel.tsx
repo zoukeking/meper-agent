@@ -168,7 +168,7 @@ function historyEntryToTimeline(entries: TimelineEntryData[]): TimelineEntry[] {
       // Find the last pending tool_call with matching name
       const pending = pendingToolCalls.get(e.tool_name ?? '')
       if (pending) {
-        const isError = e.content?.startsWith('Error')
+        const isError = e.status === 'error'
         result[pending.idx] = {
           ...pending.entry,
           result: e.content,
