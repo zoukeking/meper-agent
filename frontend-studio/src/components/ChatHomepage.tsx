@@ -823,7 +823,7 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
           }
           case 'tool_result': {
             const resultContent = evt.content;
-            const isError = /\b(error|fail)/i.test(resultContent);
+            const isError = evt.status === 'error';
             // 解析工具结果里产出的 output 文件，累积到 agent 气泡（去重）
             const newAtts = parseOutputAttachments(resultContent);
             if (newAtts.length > 0) {
@@ -882,8 +882,16 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
               updateMsg(prev, agentMsgId, { status: undefined, content: finalText }),
             );
             break;
-          case 'error':
-            throw new Error(evt.content);
+          case 'error': {
+            // 不 throw 中断流：把错误记录到 agent 消息，保留 source 供展示。
+            // 错误可能来自中途（如某个工具的加载失败），后续仍可能有事件。
+            const errContent = evt.content || '执行出错';
+            setStreamError(errContent);
+            setLiveMessages((prev) =>
+              updateMsg(prev, agentMsgId, { status: 'error', content: `❌ ${errContent}` }),
+            );
+            break;
+          }
           case 'interrupt': {
             // Agent 经 ask_clarification 暂停等待用户回答：标记最近的 ask_clarification
             // tool 消息为可交互，并记录其 id，使下一次发送走 /resume。

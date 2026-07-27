@@ -170,6 +170,7 @@ export interface ToolResultEvent {
   type: 'tool_result'
   tool_name: string
   content: string
+  status?: 'success' | 'error'
 }
 
 /** Incremental text delta streamed from the LLM */
@@ -188,6 +189,7 @@ export interface TextEvent {
 export interface ErrorEvent {
   type: 'error'
   content: string
+  source?: 'llm' | 'tool' | 'graph'
 }
 
 /** Agent paused via interrupt, awaiting user answer */
