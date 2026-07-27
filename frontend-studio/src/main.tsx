@@ -25,7 +25,7 @@ const queryClient = new QueryClient({
     mutations: {
       // 全局兜底：所有 mutation 失败自动 toast，避免遗漏 onError 导致静默。
       onError: (err: unknown) => {
-        toast.error(extractErrorMessage(err), {duration: 0});
+        toast.error(extractErrorMessage(err));
       },
     },
   },

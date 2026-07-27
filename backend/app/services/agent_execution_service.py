@@ -195,6 +195,7 @@ class AgentExecutionService:
                 ).model_dump()
                 # 前端契约用 content，ErrorEvent 用 message，做字段重映射
                 err_evt["content"] = err_evt.pop("message", "")
+                collected_timeline.append(err_evt)   # 持久化到 agent 消息，供历史回填
                 await event_queue.put(f"data: {safe_json(err_evt)}\n\n")
                 result = {}
             finally:
@@ -275,6 +276,7 @@ class AgentExecutionService:
                     source=_classify_error_source(exc),
                 ).model_dump()
                 err_evt["content"] = err_evt.pop("message", "")
+                collected_timeline.append(err_evt)   # 持久化到 agent 消息，供历史回填
                 await event_queue.put(f"data: {safe_json(err_evt)}\n\n")
                 result = {}
             finally:

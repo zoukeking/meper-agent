@@ -400,14 +400,22 @@ async def _resolve_tools(agent: dict) -> list:
 
 
 async def _resolve_mcp_tools(agent: dict) -> list:
-    """Resolve MCP tools for Agent-bound MCP connections."""
+    """Resolve MCP tools for Agent-bound MCP connections.
+
+    Preview 是展示工具列表的辅助功能，单个 MCP 连接失败不应让整个 preview 崩溃，
+    这里降级为返回空列表（实际执行路径在 context.py 会收集 load_errors 暴露给前端）。
+    """
     from app.engine.tool.mcp_tool_cache import get_mcp_tools_cached
 
     mcp_connection_ids = agent.get("mcp_connection_ids") or []
     if not mcp_connection_ids:
         return []
 
-    return await get_mcp_tools_cached(mcp_connection_ids)
+    try:
+        return await get_mcp_tools_cached(mcp_connection_ids)
+    except Exception as exc:
+        logger.warning("preview_mcp_tools_resolve_failed", error=str(exc))
+        return []
 
 
 def _resolve_builtin_tools(agent: dict) -> list:
