@@ -340,25 +340,6 @@ textarea {
   margin-bottom: 0;
 }
 
-.welcome-suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  max-width: min(100%, 560px);
-  margin-top: 20px;
-}
-.welcome-suggestion {
-  border-color: color-mix(in srgb, var(--client-accent) 30%, var(--client-border));
-  background: var(--client-surface);
-  color: var(--client-accent);
-  border-radius: 12px;
-}
-.welcome-suggestion:hover:not(:disabled) {
-  border-color: var(--client-accent);
-  background: var(--client-accent-soft);
-}
-
 .message-viewport {
   min-height: 0;
   flex: 1;
@@ -602,6 +583,30 @@ textarea {
   border: 1px solid var(--client-border);
   border-radius: 12px;
   background: var(--client-surface);
+}
+
+.composer-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+
+.composer-quick-actions .quick-action {
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  border-radius: 999px;
+  border-color: color-mix(in srgb, var(--client-accent) 30%, var(--client-border));
+  background: var(--client-surface);
+  color: var(--client-accent);
+}
+
+.composer-quick-actions .quick-action:hover:not(:disabled) {
+  border-color: var(--client-accent);
+  background: var(--client-accent-soft);
 }
 
 .hidden-file-input {
