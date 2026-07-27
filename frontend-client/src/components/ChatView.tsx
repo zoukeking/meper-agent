@@ -189,20 +189,6 @@ export function ChatView({ agent, sessionId, onOpenNavigation, onCreateSession }
                     </Typography.Paragraph>
                   </>
                 )}
-                {agent.recommendedItems && agent.recommendedItems.length > 0 ? (
-                  <div className="welcome-suggestions">
-                    {agent.recommendedItems.map((item, index) => (
-                      <Button
-                        key={`${index}:${item.label}`}
-                        className="welcome-suggestion"
-                        disabled={running}
-                        onClick={() => submit(item.prompt || item.label)}
-                      >
-                        {item.label}
-                      </Button>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             ) : (
               <Bubble.List
@@ -323,6 +309,20 @@ export function ChatView({ agent, sessionId, onOpenNavigation, onCreateSession }
                   )
                 }}
               />
+            ) : null}
+            {agent.recommendedItems && agent.recommendedItems.length > 0 ? (
+              <div className="composer-quick-actions">
+                {agent.recommendedItems.map((item, index) => (
+                  <Button
+                    key={`${index}:${item.label}`}
+                    className="quick-action"
+                    disabled={running || Boolean(hitl)}
+                    onClick={() => submit(item.prompt || item.label)}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
             ) : null}
             <Sender
               value={input}
