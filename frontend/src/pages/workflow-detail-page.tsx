@@ -493,11 +493,6 @@ export default function WorkflowDetailPage() {
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() })
       setHasChanges(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '保存失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Warn on close/refresh when unsaved ─── */
@@ -593,11 +588,6 @@ export default function WorkflowDetailPage() {
       queryClient.invalidateQueries({ queryKey: workflowKeys.detail(id!) })
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() })
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '发布失败'
-      message.error(msg)
-    },
   })
 
   const archiveMutation = useMutation({
@@ -606,11 +596,6 @@ export default function WorkflowDetailPage() {
       message.success('工作流已归档')
       queryClient.invalidateQueries({ queryKey: workflowKeys.detail(id!) })
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '归档失败'
-      message.error(msg)
     },
   })
 

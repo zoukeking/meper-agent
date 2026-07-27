@@ -47,14 +47,6 @@ const PROVIDER_OPTIONS = (Object.keys(PROVIDER_LABELS) as ChannelProvider[]).map
   label: PROVIDER_LABELS[p],
 }))
 
-function errorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const msg = (err as { message: unknown }).message
-    if (typeof msg === 'string' && msg) return msg
-  }
-  return fallback
-}
-
 export default function ChannelsPage() {
   const queryClient = useQueryClient()
   const [modalOpen, setModalOpen] = useState(false)
@@ -86,9 +78,6 @@ export default function ChannelsPage() {
       setModalOpen(false)
       form.resetFields()
     },
-    onError: (err: unknown) => {
-      message.error(errorMessage(err, '创建失败'))
-    },
   })
 
   const updateMutation = useMutation({
@@ -101,9 +90,6 @@ export default function ChannelsPage() {
       form.resetFields()
       setEditing(null)
     },
-    onError: (err: unknown) => {
-      message.error(errorMessage(err, '更新失败'))
-    },
   })
 
   const deleteMutation = useMutation({
@@ -111,9 +97,6 @@ export default function ChannelsPage() {
     onSuccess: () => {
       message.success('已删除')
       queryClient.invalidateQueries({ queryKey: channelKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      message.error(errorMessage(err, '删除失败'))
     },
   })
 
@@ -125,9 +108,6 @@ export default function ChannelsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: channelKeys.lists() })
     },
-    onError: (err: unknown) => {
-      message.error(errorMessage(err, '操作失败'))
-    },
   })
 
   const resetMutation = useMutation({
@@ -135,9 +115,6 @@ export default function ChannelsPage() {
     onSuccess: () => {
       message.success('已重置')
       queryClient.invalidateQueries({ queryKey: channelKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      message.error(errorMessage(err, '重置失败'))
     },
   })
 

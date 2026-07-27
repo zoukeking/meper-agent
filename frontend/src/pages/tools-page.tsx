@@ -17,7 +17,6 @@ import {
 import { useTheme } from '../contexts/ThemeContext'
 import { toolsApi, toolKeys } from '../services/tools-api'
 import { agentKeys } from '../services/agent-api'
-import { normalizeError } from '../services/api-client'
 import type { BuiltinTool, Tool } from '../services/tools-api'
 import ToolCreateDrawer from '../components/tool-create-drawer'
 
@@ -251,7 +250,6 @@ function CustomToolsTab() {
       queryClient.invalidateQueries({ queryKey: toolKeys.lists() })
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
     },
-    onError: (err) => message.error(normalizeError(err as never).message),
   })
 
   const handleDelete = (tool: Tool) => {

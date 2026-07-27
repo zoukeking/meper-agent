@@ -138,11 +138,6 @@ export default function McpPage() {
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
       setModalOpen(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '创建失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: update ─── */
@@ -163,11 +158,6 @@ export default function McpPage() {
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
       setModalOpen(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '更新失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: delete ─── */
@@ -177,11 +167,6 @@ export default function McpPage() {
       message.success('MCP 连接已删除')
       queryClient.invalidateQueries({ queryKey: mcpKeys.lists() })
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 

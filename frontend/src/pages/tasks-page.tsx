@@ -241,11 +241,6 @@ export default function TasksPage() {
       setSelectedWorkflowId('')
       setCreateInput('')
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '创建失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: intervene (cancel / retry / approve / reject) ─── */
@@ -260,11 +255,6 @@ export default function TasksPage() {
         queryClient.invalidateQueries({ queryKey: taskKeys.detail(detailTaskId) })
       }
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '操作失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: delete task ─── */
@@ -276,11 +266,6 @@ export default function TasksPage() {
       if (detailTaskId) {
         queryClient.invalidateQueries({ queryKey: taskKeys.detail(detailTaskId) })
       }
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 
@@ -346,11 +331,6 @@ export default function TasksPage() {
       setEditTask(null)
       setEditDirty(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '更新失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: delete trigger (取消定时任务) ─── */
@@ -359,11 +339,6 @@ export default function TasksPage() {
     onSuccess: () => {
       message.success('定时任务已删除')
       queryClient.invalidateQueries({ queryKey: ['triggers-list'] })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 

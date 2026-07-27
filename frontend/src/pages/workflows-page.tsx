@@ -91,11 +91,6 @@ export default function WorkflowsPage() {
       setCreateOpen(false)
       navigate(`/workflows/${newWf.id}`)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '创建失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: delete ─── */
@@ -104,11 +99,6 @@ export default function WorkflowsPage() {
     onSuccess: () => {
       message.success('工作流已删除')
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 
@@ -119,11 +109,6 @@ export default function WorkflowsPage() {
       message.success('工作流已发布')
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() })
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '发布失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: archive ─── */
@@ -132,11 +117,6 @@ export default function WorkflowsPage() {
     onSuccess: () => {
       message.success('工作流已归档')
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '归档失败'
-      message.error(msg)
     },
   })
 

@@ -53,11 +53,6 @@ export default function AgentDetailPage() {
       queryClient.invalidateQueries({ queryKey: agentKeys.detail(id!) })
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() })
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '下架失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Loading / error states ─── */

@@ -162,10 +162,6 @@ export default function ApiKeysPage() {
   const revokeMutation = useMutation({
     mutationFn: (id: string) => apiKeyApi.revoke(id),
     onSuccess: () => { message.success('已吊销'); queryClient.invalidateQueries({ queryKey: apiKeyKeys.lists() }) },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err ? (err as { message: string }).message : '吊销失败'
-      message.error(msg)
-    },
   })
 
   const handleRevoke = (key: ApiKey) => {

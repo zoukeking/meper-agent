@@ -144,12 +144,6 @@ const AgentConfigForm = forwardRef<AgentConfigFormHandle, AgentConfigFormProps>(
         }
         onSaved?.()
       },
-      onError: (err: unknown) => {
-        const msg = err && typeof err === 'object' && 'message' in err
-          ? (err as { message: string }).message
-          : isEdit ? '更新失败' : '创建失败'
-        message.error(msg)
-      },
     })
 
     /* ─── Mutation: publish / archive ─── */
@@ -162,11 +156,6 @@ const AgentConfigForm = forwardRef<AgentConfigFormHandle, AgentConfigFormProps>(
           queryClient.invalidateQueries({ queryKey: agentKeys.detail(agent.id) })
         }
       },
-      onError: (err: unknown) => {
-        const msg = err && typeof err === 'object' && 'message' in err
-          ? (err as { message: string }).message : '发布失败'
-        message.error(msg)
-      },
     })
 
     const archiveMutation = useMutation({
@@ -177,11 +166,6 @@ const AgentConfigForm = forwardRef<AgentConfigFormHandle, AgentConfigFormProps>(
         if (agent) {
           queryClient.invalidateQueries({ queryKey: agentKeys.detail(agent.id) })
         }
-      },
-      onError: (err: unknown) => {
-        const msg = err && typeof err === 'object' && 'message' in err
-          ? (err as { message: string }).message : '下架失败'
-        message.error(msg)
       },
     })
 
