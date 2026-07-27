@@ -190,13 +190,16 @@ async def get_mcp_tools_cached(
         client = MultiServerMCPClient(connections, tool_name_prefix=True)
         tools = await client.get_tools()
     except Exception as exc:
-        # 提取 ExceptionGroup 的子异常以显示真正原因
+        # 提取 ExceptionGroup 的子异常以显示真正原因，然后 raise
+        # 让上层（workflow node_executor / agent context.py）捕获并
+        # 暴露给前端，不再静默 return [] 掩盖连接失败。
         if hasattr(exc, "exceptions"):
             details = "; ".join(str(e) for e in exc.exceptions)  # type: ignore[attr-defined]
             logger.error("mcp_tools_fetch_failed", connection_ids=connection_ids, error=details)
+            raise RuntimeError(f"MCP 连接失败: {details}") from exc
         else:
             logger.error("mcp_tools_fetch_failed", connection_ids=connection_ids, error=str(exc))
-        return []
+            raise
 
     # Rename from library format "{server}_{tool}" to "mcp__{server}__{tool}"
     # matching Claude Code's MCP tool naming convention.
