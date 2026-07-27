@@ -104,6 +104,7 @@ async def resolve_harness_context(
         enable_thinking=enable_thinking,
         has_workspace=workspace is not None,
     )
+    load_errors: list[dict] = []
 
     from pathlib import Path
 
@@ -167,32 +168,49 @@ async def resolve_harness_context(
             skill_mgr.set_allowed(allowed_names)
             all_tools.append(skill_mgr.make_load_tool())
 
-    # 4. MCP:用 harness McpToolLoader 替换 backend 的 MCP 工具
+    # 4. MCP:用 harness McpToolLoader 替换 backend 的 MCP 工具。
+    # 逐 server 加载而非一次性全部加载,以便单个 server 失败时收集错误
+    # 信息暴露给前端(不再静默跳过)。
     mcp_connection_ids = agent.get("mcp_connection_ids") or []
     if mcp_connection_ids:
         from agent_flow_harness import McpConnectionConfig, McpToolLoader
 
         from app.services.mcp_connection_service import McpConnectionService
 
-        mcp_configs: list[McpConnectionConfig] = []
+        mcp_loader = McpToolLoader()
         for conn_id in mcp_connection_ids:
             conn_doc = await McpConnectionService.get_connection(conn_id)
-            if conn_doc:
-                mcp_configs.append(McpConnectionConfig(
-                    name=conn_doc.get("name", conn_id),
-                    url=conn_doc.get("url", ""),
-                    protocol=conn_doc.get("protocol", "streamable-http"),
-                    auth_type=conn_doc.get("auth_type", "none"),
-                    auth_config=conn_doc.get("auth_config") or {},
-                    timeout=conn_doc.get("timeout", 30),
-                    default_params=conn_doc.get("default_params") or {},
-                ))
-        if mcp_configs:
-            mcp_loader = McpToolLoader()
-            mcp_tools = await mcp_loader.load_tools(mcp_configs)
-            all_tools.extend(mcp_tools)
+            if not conn_doc:
+                load_errors.append({
+                    "tool_name": f"mcp:{conn_id}",
+                    "error": f"MCP 连接 {conn_id} 不存在",
+                })
+                continue
+            config = McpConnectionConfig(
+                name=conn_doc.get("name", conn_id),
+                url=conn_doc.get("url", ""),
+                protocol=conn_doc.get("protocol", "streamable-http"),
+                auth_type=conn_doc.get("auth_type", "none"),
+                auth_config=conn_doc.get("auth_config") or {},
+                timeout=conn_doc.get("timeout", 30),
+                default_params=conn_doc.get("default_params") or {},
+            )
+            try:
+                conn_tools = await mcp_loader.load_tools([config])
+                if not conn_tools:
+                    load_errors.append({
+                        "tool_name": f"mcp:{conn_doc.get('name', conn_id)}",
+                        "error": f"MCP server {conn_doc.get('name')} 未返回工具(可能连接失败或无可用工具)",
+                    })
+                all_tools.extend(conn_tools)
+            except Exception as exc:
+                logger.warning("mcp_connection_load_failed", connection=conn_doc.get("name"), error=str(exc))
+                load_errors.append({
+                    "tool_name": f"mcp:{conn_doc.get('name', conn_id)}",
+                    "error": f"MCP 工具加载失败: {exc}",
+                })
 
-    # 4.5. 自定义工具 (openapi / code / prebuilt)
+    # 4.5. 自定义工具 (openapi / code / prebuilt)。收集加载失败暴露给前端。
     custom_tools = agent.get("custom_tools") or []
     if custom_tools:
         from app.engine.tool.tool_builder import build_tool
@@ -205,12 +223,29 @@ async def resolve_harness_context(
                 continue
             docs = await ToolService.get_tools_by_ids([tool_id])
             if not docs:
+                load_errors.append({
+                    "tool_name": f"custom:{tool_id}",
+                    "error": f"自定义工具 {tool_id} 不存在",
+                })
                 continue
             doc = docs[0]
             # 解密 user_args 里的 sensitive 字段
             user_args = _decrypt_user_args(doc, user_args)
-            tool = await build_tool(doc, user_args=user_args)
-            if tool is not None:
+            try:
+                tool = await build_tool(doc, user_args=user_args)
+            except Exception as exc:
+                logger.warning("custom_tool_build_failed", tool_id=tool_id, error=str(exc))
+                load_errors.append({
+                    "tool_name": f"custom:{doc.get('name', tool_id)}",
+                    "error": f"自定义工具构建失败: {exc}",
+                })
+                continue
+            if tool is None:
+                load_errors.append({
+                    "tool_name": f"custom:{doc.get('name', tool_id)}",
+                    "error": f"自定义工具 {doc.get('name')} 构建返回空",
+                })
+            else:
                 all_tools.append(tool)
 
     # 5. 构造 agent_doc(含 token budget guard 防止会话被滥用)
@@ -305,6 +340,7 @@ async def resolve_harness_context(
         "agent_doc": agent_doc,
         "llm": llm,
         "tools": all_tools,
+        "load_errors": load_errors,
         "sb_token": sb_token,
         "ws_token": ws_token,
         "ut_token": ut_token,
