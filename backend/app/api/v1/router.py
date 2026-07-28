@@ -10,6 +10,7 @@ from app.api.v1.channels import router as channels_router
 from app.api.v1.credentials import router as credentials_router
 from app.api.v1.ext import router as ext_router
 from app.api.v1.files import router as files_router
+from app.api.v1.knowledge_bases import router as knowledge_bases_router
 from app.api.v1.health import router as health_router
 from app.api.v1.mcp import router as mcp_router
 from app.api.v1.models import router as models_router
@@ -33,6 +34,7 @@ api_v1_router.include_router(credentials_router)
 api_v1_router.include_router(api_keys_router)
 api_v1_router.include_router(ext_router)
 api_v1_router.include_router(files_router)
+api_v1_router.include_router(knowledge_bases_router)
 api_v1_router.include_router(models_router)
 api_v1_router.include_router(notifications_router)
 api_v1_router.include_router(sessions_router)

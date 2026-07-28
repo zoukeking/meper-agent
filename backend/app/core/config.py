@@ -97,6 +97,22 @@ class Settings(BaseSettings):
     # Workspace quota — max bytes per workspace (default 500 MB).
     WORKSPACE_MAX_BYTES: int = 500 * 1024 * 1024
 
+    # Knowledge Base filesystem — root directory where KB .md files live.
+    # Each KB lives under ``{KB_CONTAINER_DIR}/{kb_id}/`` (tree-style: agents
+    # explore it at runtime via kb_glob/kb_grep/kb_read, no index, no vector).
+    # None = derive from KB_HOST_DIR (local dev).
+    # Docker: set explicitly by docker-compose (e.g. /data/knowledge_bases).
+    KB_CONTAINER_DIR: str | None = None
+    # Host-side path for Knowledge Bases (the one users configure in .env).
+    KB_HOST_DIR: str = "~/.agent-flow/knowledge_bases"
+
+    # Knowledge Base tool limits (truncation / caps, aligned with langxin tree KB).
+    KB_GLOB_MAX_RESULTS: int = 200
+    KB_GREP_MAX_FILES: int = 50
+    KB_GREP_MAX_MATCHES: int = 200
+    KB_READ_MAX_BYTES: int = 16_384
+    KB_MAX_FILE_SIZE: int = 2 * 1024 * 1024  # 2 MB per uploaded .md
+
     @model_validator(mode="after")
     def _default_internal_dirs_from_host(self) -> "Settings":
         """Default container-internal dirs to host dirs when not explicitly set.
@@ -108,10 +124,13 @@ class Settings(BaseSettings):
         # Expand ~ in host dirs so Docker can use them directly
         self.WORKSPACES_HOST_DIR = os.path.expanduser(self.WORKSPACES_HOST_DIR)
         self.SKILLS_HOST_DIR = os.path.expanduser(self.SKILLS_HOST_DIR)
+        self.KB_HOST_DIR = os.path.expanduser(self.KB_HOST_DIR)
         if self.WORKSPACES_CONTAINER_DIR is None:
             self.WORKSPACES_CONTAINER_DIR = self.WORKSPACES_HOST_DIR
         if self.SKILLS_CONTAINER_DIR is None:
             self.SKILLS_CONTAINER_DIR = self.SKILLS_HOST_DIR
+        if self.KB_CONTAINER_DIR is None:
+            self.KB_CONTAINER_DIR = self.KB_HOST_DIR
         return self
 
     # ── Sandbox ──────────────────────────────────────────────────────────

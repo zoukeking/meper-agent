@@ -168,6 +168,23 @@ async def resolve_harness_context(
             skill_mgr.set_allowed(allowed_names)
             all_tools.append(skill_mgr.make_load_tool())
 
+    # 3.5 Knowledge Bases: kb_glob / kb_grep / kb_read (tree-style KB explore).
+    # KB 文件存 FS（{KB_CONTAINER_DIR}/{kb_id}/），不依赖 sandbox，backend 进程直读。
+    kb_ids = agent.get("knowledge_base_ids") or []
+    if kb_ids:
+        from app.db.mongodb import get_database
+        from app.engine.tool.kb_fs import get_kb_base_path
+        from app.engine.tool.kb_manager import KbManager
+
+        kb_docs = await get_database()["knowledge_bases"].find(
+            {"_id": {"$in": kb_ids}}
+        ).to_list(len(kb_ids))
+        kb_roots: dict[str, Path] = {
+            d["_id"]: get_kb_base_path(d["_id"]) for d in kb_docs
+        }
+        if kb_roots:
+            all_tools.extend(KbManager(kb_roots).make_tools())
+
     # 4. MCP:用 harness McpToolLoader 替换 backend 的 MCP 工具。
     # 逐 server 加载而非一次性全部加载,以便单个 server 失败时收集错误
     # 信息暴露给前端(不再静默跳过)。
