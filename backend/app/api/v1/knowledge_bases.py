@@ -1,10 +1,7 @@
 """KnowledgeBase API endpoints — Markdown KB CRUD + .md file management."""
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from loguru import logger
 
 from app.core.security import get_current_user, require_permission
 from app.schemas.knowledge_base import (

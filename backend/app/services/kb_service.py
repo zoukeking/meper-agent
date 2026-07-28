@@ -167,7 +167,7 @@ class KnowledgeBaseService:
         try:
             kb_fs.write_kb_file(kb_id, rel_path, new_content)
         except ValueError as exc:
-            raise ValidationError(code="KB_INVALID_PATH", message=str(exc))
+            raise ValidationError(code="KB_INVALID_PATH", message=str(exc)) from exc
         await col.update_one({"_id": kb_id}, {"$set": {"updated_at": utc_now().isoformat()}})
         await KnowledgeBaseService.recompute_stats(kb_id)
         return {

@@ -26,7 +26,6 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.engine.tool.workspace import WorkspaceManager
 
-
 # ── args schemas (module-level; descriptions are per-instance) ─────────
 
 
@@ -97,7 +96,7 @@ class KbManager:
             base = self._kb_roots[kid]
             try:
                 iterator = base.glob(pattern)
-            except Exception as exc:
+            except Exception:
                 continue
             for p in iterator:
                 if not p.is_file() or p.suffix.lower() != ".md":
