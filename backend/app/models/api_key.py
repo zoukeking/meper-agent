@@ -54,5 +54,13 @@ class ApiKey(BaseModel):
     status: ApiKeyStatus = Field(default=ApiKeyStatus.ACTIVE)
     expires_at: str | None = Field(default=None)
     last_used_at: str | None = Field(default=None)
+    user_info_url: str = Field(
+        default="",
+        max_length=500,
+        description=(
+            "接入方 introspection 端点 URL。"
+            "空=兼容模式(visitor_id);有值=回调验证模式(X-User-Token)"
+        ),
+    )
     created_at: str = Field(default_factory=lambda: utc_now().isoformat())
     updated_at: str = Field(default_factory=lambda: utc_now().isoformat())

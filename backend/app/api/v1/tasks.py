@@ -260,7 +260,7 @@ async def intervene_task(
     Requires ``version`` field for optimistic locking.
     Returns 409 on version conflict.
     """
-    valid_actions = {"approve", "reject", "skip", "cancel", "resume", "retry"}
+    valid_actions = {"approve", "reject", "skip", "cancel", "resume", "retry", "rewind"}
 
     if body.action not in valid_actions:
         raise AppValidationError(
@@ -440,6 +440,22 @@ async def intervene_task(
         # Start workflow execution from scratch
         TaskService.resume_task_execution(task_id)
 
+    elif body.action == "rewind":
+        # Rewind: trim target_node_id + downstream from checkpoint, optionally
+        # merge variables, atomically transition waiting_human → running, then
+        # resume (engine re-executes target + downstream; untrimmed skipped).
+        # WAITING_HUMAN / checkpoint / target validation is enforced inside
+        # rewind_task (raises ConflictError/ValidationError → ExceptionMiddleware
+        # maps to 409/422). No try/except needed here, same as approve/reject.
+        doc = await TaskService.rewind_task(
+            task_id=task_id,
+            target_node_id=body.target_node_id or "",
+            variables=body.variables,
+            comment=body.comment,
+            triggered_by=current_user.id,
+            version=body.version,
+        )
+
     action_messages = {
         "approve": "审批通过",
         "reject": "已驳回",
@@ -447,6 +463,7 @@ async def intervene_task(
         "cancel": "已取消",
         "resume": "已恢复",
         "retry": "重试中",
+        "rewind": "已退回重跑",
     }
 
     return TaskInterveneResponse(

@@ -215,7 +215,7 @@ async def _build_code_tool(
             user_env[f"USER_{k}"] = str(v)
 
         # Execute code in sandbox
-        from agent_flow_harness.sandbox import get_sandbox_context
+        from agent_flow_harness import get_sandbox_context
 
         sandbox_ctx = get_sandbox_context()
         if sandbox_ctx is None:
@@ -292,7 +292,7 @@ def _build_prebuilt_tool(
     ``CommunityTool``, builds it with the tool's ``config``; if it is a plain
     ``BaseTool``, returns it directly.
     """
-    from agent_flow_harness.tools.registry import TOOL_REGISTRY
+    from agent_flow_harness import TOOL_REGISTRY
 
     prebuilt_name = tool_doc.get("prebuilt_name", "")
     if not prebuilt_name:

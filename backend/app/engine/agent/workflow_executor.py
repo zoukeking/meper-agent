@@ -120,64 +120,33 @@ def _sanitise_task(doc: dict) -> dict:
 
 
 @tool
-async def task_query(task_id: str) -> str:
-    """Query the current execution status and output of a Task.
+async def task_query(task_ids: list[str]) -> str:
+    """Query the current execution status and output of Tasks by their IDs.
+
+    Only the tasks whose IDs are explicitly provided are returned — this
+    prevents the Agent from scanning Tasks it did not create.  Pass the
+    task IDs returned by workflow tools (e.g. ``dispatch_workflow``).
 
     Args:
-        task_id: ID of the task to query (returned by workflow tools).
+        task_ids: List of task IDs to query.
     """
     try:
-        doc = await TaskService.get_task(task_id)
-        if doc is None:
-            return _to_json({"error": f"Task {task_id} 不存在"})
-        data = _sanitise_task(doc)
-        data["type"] = "task_result"
-        return _to_json(data)
+        if not task_ids:
+            return _to_json({"error": "task_ids 不能为空"})
+
+        items: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for task_id in task_ids:
+            doc = await TaskService.get_task(task_id)
+            if doc is None:
+                missing.append(task_id)
+                continue
+            items.append(_sanitise_task(doc))
+
+        return _to_json({"items": items, "missing": missing})
     except Exception as exc:
-        logger.error("task_query_error", task_id=task_id, error=str(exc))
+        logger.error("task_query_error", task_ids=task_ids, error=str(exc))
         return _to_json({"error": f"查询 Task 失败: {exc}"})
-
-
-@tool
-async def task_list(
-    status: str = "",
-    workflow_id: str = "",
-    page: int = 1,
-    page_size: int = 20,
-) -> str:
-    """List Tasks with optional filters.
-
-    Args:
-        status: Filter by status (pending, running, waiting_human,
-            completed, failed, cancelled).  Empty string means all.
-        workflow_id: Optional workflow template ID filter.
-        page: Page number (1-based).
-        page_size: Items per page (max 100).
-    """
-    try:
-        status_enum = None
-        if status:
-            try:
-                status_enum = TaskStatus(status)
-            except ValueError:
-                return _to_json({"error": f"无效的状态: {status}"})
-
-        docs, total = await TaskService.list_tasks(
-            page=page,
-            page_size=min(page_size, 100),
-            status=status_enum,
-            workflow_id=workflow_id or None,
-        )
-
-        return _to_json({
-            "items": [_sanitise_task(d) for d in docs],
-            "total": total,
-            "page": page,
-            "page_size": min(page_size, 100),
-        })
-    except Exception as exc:
-        logger.error("task_list_error", error=str(exc))
-        return _to_json({"error": f"查询 Task 列表失败: {exc}"})
 
 
 async def _intervene(
@@ -313,56 +282,42 @@ async def update_task_variables(task_id: str, variables: str, version: int = 0) 
 
 
 # ---------------------------------------------------------------------------
-# Workflow proposal tool — shows a confirmation card to the user
+# Workflow confirmation tool — interrupts to ask the user to confirm
 # ---------------------------------------------------------------------------
 
 
 @tool
-async def propose_workflow(
+async def confirm_workflow(
     workflow_name: str,
+    description: str,
     params: ParamsDict = None,
 ) -> str:
-    """Propose a workflow to the user by showing a confirmation card.
+    """Ask the user to confirm executing a workflow. Execution pauses
+    (interrupt) and a confirmation card is shown; the tool returns once
+    the user confirms or rejects.
 
-    Looks up the workflow by name and returns structured info for the
-    frontend to render as a confirmation card.  Does NOT create a Task.
-
-    After calling this, just tell the user you found a suitable workflow
-    — the system will handle the rest.
-
-    Only call ``dispatch_workflow`` when the user explicitly confirms
-    (e.g. says '确认', '好的', '是的').
+    The agent already knows the workflow's name and description from the
+    system prompt, so pass them straight through — this tool does not
+    look anything up. Do NOT create a Task here; call ``dispatch_workflow``
+    only after the user confirms.
 
     Args:
-        workflow_name: The name or ID of the workflow to propose.
-        params: Input parameters to show in the proposal (optional).
+        workflow_name: Name of the workflow to confirm (from system prompt).
+        description: Short description of the workflow (from system prompt).
+        params: Input parameters being proposed for the workflow.
     """
-    from app.services.workflow_registry_service import WorkflowRegistryService
+    from langgraph.types import interrupt
 
-    try:
-        entry = await WorkflowRegistryService.get_by_name(workflow_name)
-        if entry is None:
-            entry = await WorkflowRegistryService.get_by_workflow_id(workflow_name)
-        if entry is None:
-            return _to_json({
-                "error": f"工作流 '{workflow_name}' 不存在",
-                "available_workflows": [],
-            })
-
-        return _to_json({
-            "type": "workflow_proposal",
-            "workflow_name": entry.get("name", workflow_name),
-            "workflow_description": entry.get("description", ""),
-            "input_preview": dict(params) if params else {},
-            "has_human_node": entry.get("has_human_node", False),
-        })
-    except Exception as exc:
-        logger.error(
-            "propose_workflow_error",
-            workflow_name=workflow_name,
-            error=str(exc),
-        )
-        return _to_json({"error": f"提议工作流失败: {exc}"})
+    payload = {
+        "type": "workflow_confirmation",
+        "workflow_name": workflow_name,
+        "workflow_description": description,
+        "input_preview": dict(params) if params else {},
+    }
+    # interrupt() suspends the graph; resume(Command(resume=answer)) returns
+    # the user's confirmation/rejection text, which we hand back to the LLM.
+    answer = interrupt(payload)
+    return answer if isinstance(answer, str) else str(answer)
 
 
 # ---------------------------------------------------------------------------
@@ -413,18 +368,28 @@ async def dispatch_workflow(
         from app.engine.agent.builtin_tools import _get_workspace
 
         actor_id = "agent"
+        source_session_id = ""
         try:
             ws = _get_workspace()
             if ws is not None and getattr(ws, "user_id", ""):
                 actor_id = ws.user_id
+                # Capture originating session so token stats can attribute
+                # task consumption back to the conversation that triggered it.
+                source_session_id = getattr(ws, "session_id", "") or ""
         except Exception:
             pass
+
+        # source_session_id is written via ext_metadata so the Task model
+        # stays untouched. It joins tasks back to ext_api_call_logs.session_id
+        # for full-conversation token accounting.
+        ext_meta = {"source_session_id": source_session_id} if source_session_id else None
 
         doc = await TaskService.create_task(
             workflow_id=entry.get("workflow_id") or entry.get("_id", ""),
             input_data=input_data,
             created_by=actor_id,
             created_by_type="agent",
+            ext_metadata=ext_meta,
         )
 
         result: dict[str, Any] = {
@@ -455,10 +420,9 @@ async def dispatch_workflow(
 # ---------------------------------------------------------------------------
 
 _TASK_TOOLS: list[BaseTool] = [
-    propose_workflow,
+    confirm_workflow,
     dispatch_workflow,
     task_query,
-    task_list,
     task_intervene,
     cancel_task,
     update_task_variables,

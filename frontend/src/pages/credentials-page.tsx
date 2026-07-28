@@ -5,7 +5,6 @@ import { Button, Form, Input, Modal, Select, Space, message, Tag } from 'antd'
 import { DeleteOutlined, PlusOutlined, KeyOutlined } from '@ant-design/icons'
 import type { CredentialType, Credential } from '../services/credentials-api'
 import { credentialsApi, credentialKeys } from '../services/credentials-api'
-import { normalizeError } from '../services/api-client'
 
 const TYPE_COLORS: Record<CredentialType, string> = {
   api_key: 'blue',
@@ -39,7 +38,6 @@ export default function CredentialsPage() {
       setCreateOpen(false)
       form.resetFields()
     },
-    onError: (err: unknown) => message.error(normalizeError(err as { code: string; message: string }).message),
   })
 
   const deleteMutation = useMutation({
@@ -48,7 +46,6 @@ export default function CredentialsPage() {
       message.success('凭据已删除')
       queryClient.invalidateQueries({ queryKey: credentialKeys.all })
     },
-    onError: (err: unknown) => message.error(normalizeError(err as { code: string; message: string }).message),
   })
 
   const handleDelete = (cred: Credential) => {

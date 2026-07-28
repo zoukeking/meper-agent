@@ -26,6 +26,7 @@ from app.schemas.user import UserResponse
 from app.services.file_service import FileService
 from app.services.file_storage import LocalFileStorage
 from app.services.session_service import MessageService, SessionService
+from app.utils.http import build_content_disposition
 from app.utils.sanitize import sanitize_text
 
 router = APIRouter(
@@ -466,7 +467,7 @@ async def download_session_file(
         open(resolved, "rb"),
         media_type=content_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{resolved.name}"',
+            "Content-Disposition": build_content_disposition(resolved.name),
             "Content-Length": str(resolved.stat().st_size),
         },
     )

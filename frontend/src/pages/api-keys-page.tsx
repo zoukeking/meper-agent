@@ -17,6 +17,7 @@ import {
   KeyOutlined,
   CopyOutlined,
   DeleteOutlined,
+  EditOutlined,
   ExclamationCircleOutlined,
   LinkOutlined,
   ApiOutlined,
@@ -63,66 +64,104 @@ export default function ApiKeysPage() {
   })
   const agentMap = new Map((allAgentsData?.items ?? []).map(a => [a.id, a.name]))
 
-  /* ─── Create Key modal ─── */
-  const [createKeyOpen, setCreateKeyOpen] = useState(false)
-  const [creating, setCreating] = useState(false)
+  /* ─── Create/Edit Key modal (shared form state) ─── */
+  // formMode: 'create' | 'edit' | null（null = 关闭）
+  const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
   const [formName, setFormName] = useState('')
   const [formScopes, setFormScopes] = useState<string[]>([])
   const [formAgentBindings, setFormAgentBindings] = useState<string[]>([])
   const [formWorkflowBindings, setFormWorkflowBindings] = useState<string[]>([])
   const [formRateLimit, setFormRateLimit] = useState(60)
   const [formExpiresAt, setFormExpiresAt] = useState<string | null>(null)
+  const [formUserInfoUrl, setFormUserInfoUrl] = useState<string>('')
   const [revealedKey, setRevealedKey] = useState<{ name: string; key: string } | null>(null)
 
   const { data: agentsData } = useQuery({
     queryKey: ['agents', 'published-select'],
     queryFn: () => agentApi.list({ page_size: 200, status: 'published' }),
-    enabled: createKeyOpen,
+    enabled: formMode !== null,
   })
   const { data: workflowsData } = useQuery({
     queryKey: ['workflows', 'published-select'],
     queryFn: () => workflowsApi.list({ page_size: 200, status: 'published' }),
-    enabled: createKeyOpen,
+    enabled: formMode !== null,
   })
   const agents = agentsData?.items ?? []
   const workflows = workflowsData?.items ?? []
 
-  const handleCreateKey = () => {
+  const resetForm = () => {
     setFormName(''); setFormScopes([]); setFormAgentBindings([])
     setFormWorkflowBindings([]); setFormRateLimit(60); setFormExpiresAt(null)
-    setCreateKeyOpen(true)
+    setFormUserInfoUrl('')
   }
 
-  const handleCreateKeySubmit = async () => {
+  const handleCreateKey = () => {
+    resetForm()
+    setEditingId(null)
+    setFormMode('create')
+  }
+
+  const handleEditKey = (key: ApiKey) => {
+    setFormName(key.name)
+    setFormScopes(key.scopes)
+    setFormAgentBindings(key.bindings.agents)
+    setFormWorkflowBindings(key.bindings.workflows)
+    setFormRateLimit(key.rate_limit)
+    setFormExpiresAt(key.expires_at)
+    setFormUserInfoUrl(key.user_info_url ?? '')
+    setEditingId(key.id)
+    setFormMode('edit')
+  }
+
+  const closeForm = () => {
+    setFormMode(null)
+    setEditingId(null)
+  }
+
+  const handleKeySubmit = async () => {
     if (!formName.trim()) { message.warning('请输入名称'); return }
     if (formScopes.length === 0) { message.warning('请至少选择一个权限'); return }
-    setCreating(true)
+    setSubmitting(true)
     try {
-      const result = await apiKeyApi.create({
-        name: formName.trim(),
-        scopes: formScopes,
-        bindings: { agents: formAgentBindings, workflows: formWorkflowBindings },
-        rate_limit: formRateLimit,
-        expires_at: formExpiresAt,
-      })
-      message.success('API Key 创建成功')
-      queryClient.invalidateQueries({ queryKey: apiKeyKeys.lists() })
-      setCreateKeyOpen(false)
-      setRevealedKey({ name: result.name, key: result.key })
+      if (formMode === 'create') {
+        const result = await apiKeyApi.create({
+          name: formName.trim(),
+          scopes: formScopes,
+          bindings: { agents: formAgentBindings, workflows: formWorkflowBindings },
+          rate_limit: formRateLimit,
+          expires_at: formExpiresAt,
+          user_info_url: formUserInfoUrl.trim() || null,
+        })
+        message.success('API Key 创建成功')
+        queryClient.invalidateQueries({ queryKey: apiKeyKeys.lists() })
+        closeForm()
+        setRevealedKey({ name: result.name, key: result.key })
+      } else if (formMode === 'edit' && editingId) {
+        await apiKeyApi.update(editingId, {
+          name: formName.trim(),
+          scopes: formScopes,
+          bindings: { agents: formAgentBindings, workflows: formWorkflowBindings },
+          rate_limit: formRateLimit,
+          expires_at: formExpiresAt,
+          // 空串显式传 null 清除配置（后端 Omit None 语义下需要明确传值）
+          user_info_url: formUserInfoUrl.trim() || '',
+        })
+        message.success('API Key 已更新')
+        queryClient.invalidateQueries({ queryKey: apiKeyKeys.lists() })
+        closeForm()
+      }
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '创建失败'
+        ? (err as { message: string }).message : '操作失败'
       message.error(msg)
-    } finally { setCreating(false) }
+    } finally { setSubmitting(false) }
   }
 
   const revokeMutation = useMutation({
     mutationFn: (id: string) => apiKeyApi.revoke(id),
     onSuccess: () => { message.success('已吊销'); queryClient.invalidateQueries({ queryKey: apiKeyKeys.lists() }) },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err ? (err as { message: string }).message : '吊销失败'
-      message.error(msg)
-    },
   })
 
   const handleRevoke = (key: ApiKey) => {
@@ -260,6 +299,17 @@ export default function ApiKeysPage() {
                         {apiKey.key_prefix}...
                       </span>
                       <span>限速 {apiKey.rate_limit}/min</span>
+                      {apiKey.user_info_url ? (
+                        <Tooltip title={apiKey.user_info_url}>
+                          <Tag className="!m-0 !px-1.5 !py-0 !text-[10px] !rounded" style={{ color: '#7C3AED', background: '#F3E8FF', borderColor: 'transparent' }}>
+                            回调验证
+                          </Tag>
+                        </Tooltip>
+                      ) : (
+                        <Tag className="!m-0 !px-1.5 !py-0 !text-[10px] !rounded" style={{ color: '#94A3B8', background: '#F8FAFC', borderColor: 'transparent' }}>
+                          兼容模式
+                        </Tag>
+                      )}
                     </div>
                     {apiKey.bindings.agents.length > 0 && (
                       <div className="flex items-center gap-1 mt-1 flex-wrap">
@@ -286,11 +336,18 @@ export default function ApiKeysPage() {
                     {style.label}
                   </Tag>
                   {apiKey.status === 'active' && (
-                    <Tooltip title="吊销">
-                      <button onClick={() => handleRevoke(apiKey)} className="border-0 bg-transparent w-8 h-8 flex items-center justify-center rounded-md text-[#64748B] hover:text-[#EF4444] hover:bg-gray-50 transition-colors duration-150 cursor-pointer">
-                        <DeleteOutlined />
-                      </button>
-                    </Tooltip>
+                    <>
+                      <Tooltip title="编辑">
+                        <button onClick={() => handleEditKey(apiKey)} className="border-0 bg-transparent w-8 h-8 flex items-center justify-center rounded-md text-[#64748B] hover:text-[#0F172A] hover:bg-gray-50 transition-colors duration-150 cursor-pointer">
+                          <EditOutlined />
+                        </button>
+                      </Tooltip>
+                      <Tooltip title="吊销">
+                        <button onClick={() => handleRevoke(apiKey)} className="border-0 bg-transparent w-8 h-8 flex items-center justify-center rounded-md text-[#64748B] hover:text-[#EF4444] hover:bg-gray-50 transition-colors duration-150 cursor-pointer">
+                          <DeleteOutlined />
+                        </button>
+                      </Tooltip>
+                    </>
                   )}
                 </div>
               </div>
@@ -390,10 +447,16 @@ export default function ApiKeysPage() {
         )}
       </div>
 
-      {/* ════════ Create Key Modal ════════ */}
+      {/* ════════ Create / Edit Key Modal ════════ */}
       <Modal
-        title="创建 API Key" open={createKeyOpen} onCancel={() => setCreateKeyOpen(false)}
-        onOk={handleCreateKeySubmit} confirmLoading={creating} okText="创建" cancelText="取消" width={560}
+        title={formMode === 'edit' ? '编辑 API Key' : '创建 API Key'}
+        open={formMode !== null}
+        onCancel={closeForm}
+        onOk={handleKeySubmit}
+        confirmLoading={submitting}
+        okText={formMode === 'edit' ? '保存' : '创建'}
+        cancelText="取消"
+        width={560}
       >
         <div className="flex flex-col gap-4 py-2">
           <div>
@@ -429,6 +492,20 @@ export default function ApiKeysPage() {
             <div>
               <label className="block text-xs font-medium text-[#374151] mb-1">过期时间</label>
               <DatePicker showTime className="w-full" onChange={(_, dateStr) => setFormExpiresAt(dateStr ? String(dateStr) : null)} />
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-[#374151] mb-1">
+              用户认证 Introspection URL
+            </label>
+            <Input
+              value={formUserInfoUrl}
+              onChange={e => setFormUserInfoUrl(e.target.value)}
+              placeholder="https://partner.example.com/oauth/introspect"
+              maxLength={500}
+            />
+            <div className="text-[10px] text-[#94A3B8] mt-1">
+              空 = 兼容模式（用 visitor_id 做会话隔离）；填入 URL = 回调验证模式（强制请求带 <code className="font-mono">X-User-Token</code>，按 RFC 7662 校验用户）
             </div>
           </div>
         </div>

@@ -106,12 +106,6 @@ export default function AgentsPage() {
       message.success('Agent 已删除')
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() })
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message
-        : '删除失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: duplicate agent ─── */
@@ -120,12 +114,6 @@ export default function AgentsPage() {
     onSuccess: () => {
       message.success('Agent 已复制')
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message
-        : '复制失败'
-      message.error(msg)
     },
   })
 
@@ -136,11 +124,6 @@ export default function AgentsPage() {
       message.success('Agent 已发布')
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() })
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '发布失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: archive agent ─── */
@@ -149,11 +132,6 @@ export default function AgentsPage() {
     onSuccess: () => {
       message.success('Agent 已下架')
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '下架失败'
-      message.error(msg)
     },
   })
 

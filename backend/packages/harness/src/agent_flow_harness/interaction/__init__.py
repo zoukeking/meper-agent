@@ -6,7 +6,10 @@ tool_search: 按关键词检索可用工具，读 TOOL_REGISTRY 单例。
 
 设计见 docs/implementation-artifacts/v0-2-x-tool-registry-enhancement.md。
 """
-from agent_flow_harness.interaction.clarification import ask_clarification
+from agent_flow_harness.interaction.clarification import (
+    ClarificationField,
+    ask_clarification,
+)
 from agent_flow_harness.interaction.tool_search import tool_search
 
-__all__ = ["ask_clarification", "tool_search"]
+__all__ = ["ask_clarification", "ClarificationField", "tool_search"]

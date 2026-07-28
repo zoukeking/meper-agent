@@ -37,6 +37,8 @@ class AgentService:
         default_model: str = "",
         max_retry: int = 3,
         max_tokens: int = 0,
+        welcome_message: str = "",
+        recommended_items: list[dict] | None = None,
     ) -> dict:
         """Create a new Agent in draft status.
 
@@ -98,6 +100,8 @@ class AgentService:
             "default_model": agent.default_model,
             "max_retry": agent.max_retry,
             "max_tokens": agent.max_tokens,
+            "welcome_message": welcome_message,
+            "recommended_items": recommended_items or [],
             "status": agent.status.value,
             "created_at": agent.created_at,
             "updated_at": agent.updated_at,
@@ -187,6 +191,8 @@ class AgentService:
         default_model: str = "",
         max_retry: int = 3,
         max_tokens: int = 0,
+        welcome_message: str = "",
+        recommended_items: list[dict] | None = None,
     ) -> dict | None:
         """Update an existing Agent's configuration.
 
@@ -251,6 +257,8 @@ class AgentService:
             "default_model": default_model,
             "max_retry": max_retry,
             "max_tokens": max_tokens,
+            "welcome_message": welcome_message,
+            "recommended_items": recommended_items or [],
             "updated_at": now_iso,
         }
 
@@ -475,6 +483,8 @@ class AgentService:
             default_model=_resolve_default_model(source),
             max_retry=_resolve_max_retry(source),
             max_tokens=source.get("max_tokens", 0),
+            welcome_message=source.get("welcome_message", ""),
+            recommended_items=source.get("recommended_items", []),
         )
 
 

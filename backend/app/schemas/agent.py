@@ -5,7 +5,7 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.agent import AgentStatus
+from app.models.agent import AgentStatus, RecommendedItem
 from app.utils.sanitize import sanitize_dict, sanitize_text
 
 # 单个 prompt_slot value 的最大字符数（兼顾详细提示词与防滥用，
@@ -90,6 +90,16 @@ class AgentUpdate(BaseModel):
         max_length=500,
         description="Agent 简要描述",
     )
+    welcome_message: str = Field(
+        default="",
+        max_length=2000,
+        description="终端用户首屏欢迎词（Markdown，可选）",
+    )
+    recommended_items: list[RecommendedItem] = Field(
+        default_factory=list,
+        max_length=10,
+        description="首屏推荐问题/操作快捷项（≤10 条）",
+    )
     prompt_slots: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -139,11 +149,20 @@ class AgentUpdate(BaseModel):
         description="会话 Token 上限（累计，0 = 使用全局默认）",
     )
 
-    @field_validator("name", "description", mode="after")
+    @field_validator("name", "description", "welcome_message", mode="after")
     @classmethod
     def _sanitize_text_fields(cls, v: str) -> str:
         """后端纵深防御：清洗存储型 XSS 载荷。"""
         return sanitize_text(v)
+
+    @field_validator("recommended_items", mode="after")
+    @classmethod
+    def _sanitize_recommended_items(cls, v: list[RecommendedItem]) -> list[RecommendedItem]:
+        """逐条清洗推荐项 label / prompt 的 XSS 载荷。"""
+        for item in v:
+            item.label = sanitize_text(item.label)
+            item.prompt = sanitize_text(item.prompt)
+        return v
 
     @field_validator("prompt_slots", mode="after")
     @classmethod
@@ -158,6 +177,8 @@ class AgentResponse(BaseModel):
     id: str
     name: str
     description: str
+    welcome_message: str = Field(default="")
+    recommended_items: list[RecommendedItem] = Field(default_factory=list)
     prompt_slots: dict[str, str] = Field(default_factory=dict)
     skill_ids: list[str]
     mcp_connection_ids: list[str]

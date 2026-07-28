@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import structlog
+
+from agent_flow_harness.mcp.user_token_context import get_user_token_context
 
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool
@@ -113,8 +115,13 @@ class McpToolLoader:
         from langchain_mcp_adapters.client import MultiServerMCPClient  # type: ignore[import-not-found]
 
         connection = self._build_connection(config)
+        # tool_interceptors 在每次工具调用时执行：把当前请求的
+        # user_token（若有）覆盖到 Authorization header，实现 per-user
+        # 身份透传。token 从 ContextVar 动态读，不烘进工具闭包。
         client = MultiServerMCPClient(
-            {config.name: connection}, tool_name_prefix=True
+            {config.name: connection},
+            tool_name_prefix=True,
+            tool_interceptors=[_user_token_interceptor],
         )
         raw_tools = await client.get_tools()
 
@@ -169,6 +176,40 @@ def _build_auth_headers(config: McpConnectionConfig) -> dict[str, str]:
         cred = base64.b64encode(f"{user}:{pwd}".encode()).decode()
         headers["Authorization"] = f"Basic {cred}"
     return headers
+
+
+# ---------------------------------------------------------------------------
+# Tool-call interceptor — 透传 user_token
+# ---------------------------------------------------------------------------
+
+# langchain-mcp-adapters 的 interceptor Protocol：
+#   async def interceptor(request, handler) -> result
+# 其中 request.headers 可被 override，adapter 内部会把 override 的
+# headers 合并到 connection.headers 上再发起请求。我们用这个机制
+# 在每次工具调用时把当前请求的 user_token 注入 Authorization header，
+# 覆盖 connection 配置里的静态凭证。
+#
+# 设计：token 从 ContextVar 动态读取（不烘进工具闭包），所以工具
+# 实例的缓存 key 仍按 connection 维度，跨用户共享工具实例安全。
+
+
+async def _user_token_interceptor(
+    request: Any,
+    handler: Callable[[Any], Awaitable[Any]],
+) -> Any:
+    """Inject current user_token into MCP call headers (overrides static).
+
+    - 有 user_token：覆盖 Authorization 为 Bearer {user_token}
+    - 无 user_token（兼容模式/平台用户）：透传，使用 connection 的静态凭证
+    """
+    user_token = get_user_token_context()
+    if not user_token:
+        return await handler(request)
+
+    # adapter 的 MCPToolCallRequest.override 会保留其它字段，
+    # 仅替换 headers；merge 由 adapter 的 execute_tool 完成。
+    overridden = request.override(headers={"Authorization": f"Bearer {user_token}"})
+    return await handler(overridden)
 
 
 def _rename_with_prefix(

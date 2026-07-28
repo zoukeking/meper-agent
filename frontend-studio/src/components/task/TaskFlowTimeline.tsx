@@ -155,15 +155,6 @@ export function TaskFlowTimeline({ task, theme = 'dark', resolveTemplateId }: Ta
     retry: 1,
   })
 
-  // Agent 节点「执行详情」：点开才按需拉取（从 checkpointer thread 读 agent trace）
-  const [execDetailNode, setExecDetailNode] = useState<string | null>(null)
-  const { data: nodeTimeline, isLoading: nodeTimelineLoading, error: nodeTimelineError } = useQuery({
-    queryKey: taskKeys.nodeTimeline(task.id, execDetailNode ?? ''),
-    queryFn: () => tasksApi.getNodeTimeline(task.id, execDetailNode!),
-    enabled: !!execDetailNode,
-    staleTime: 60_000,
-    retry: 1,
-  })
   const nodeNameMap = useMemo(() => {
     const map = new Map<string, string>()
     for (const n of wf?.nodes ?? []) {
@@ -314,19 +305,9 @@ export function TaskFlowTimeline({ task, theme = 'dark', resolveTemplateId }: Ta
                     )}
                   </div>
 
-                  {/* Agent 节点执行详情：点开按需从 checkpointer 拉 agent trace */}
+                  {/* Agent 节点执行明细：stage 展开即自动加载（每节点独立缓存，互不干扰） */}
                   {stage.nodeType === 'agent' && state !== 'pending' && (
-                    <NodeExecDetail
-                      active={execDetailNode === stage.nodeId}
-                      onToggle={() =>
-                        setExecDetailNode((prev) => (prev === stage.nodeId ? null : stage.nodeId))
-                      }
-                      loading={nodeTimelineLoading}
-                      error={nodeTimelineError}
-                      messageCount={nodeTimeline?.message_count}
-                      timeline={nodeTimeline?.timeline}
-                      theme={theme}
-                    />
+                    <NodeAgentTrace taskId={task.id} nodeId={stage.nodeId} theme={theme} />
                   )}
                 </div>
               )}
@@ -348,57 +329,43 @@ export function TaskFlowTimeline({ task, theme = 'dark', resolveTemplateId }: Ta
   )
 }
 
-/* ─── 子组件：Agent 节点执行详情（懒加载） ─── */
+/* ─── 子组件：Agent 节点执行明细（挂载即自动加载，每节点独立缓存） ─── */
 
-function NodeExecDetail({
-  active,
-  onToggle,
-  loading,
-  error,
-  messageCount,
-  timeline,
-  theme,
-}: {
-  active: boolean
-  onToggle: () => void
-  loading: boolean
-  error: unknown
-  messageCount?: number
-  timeline?: NodeTimelineEntry[]
-  theme: 'light' | 'dark'
-}) {
+function NodeAgentTrace({ taskId, nodeId, theme }: { taskId: string; nodeId: string; theme: 'light' | 'dark' }) {
+  // 组件仅在 stage 展开 + agent 节点时挂载 → 挂载即拉取；nodeId 维度的缓存键让多个
+  // agent 节点各自独立、互不串数据。收起 stage 即卸载，重展开走缓存秒显。
+  const { data: nodeTimeline, isLoading, error } = useQuery({
+    queryKey: taskKeys.nodeTimeline(taskId, nodeId),
+    queryFn: () => tasksApi.getNodeTimeline(taskId, nodeId),
+    staleTime: 60_000,
+    retry: 1,
+  })
   const mutedText = theme === 'dark' ? 'text-[#71717a]' : 'text-slate-400'
+  const errAny = error as { statusCode?: number; response?: { status?: number }; message?: string } | null
+  const errStatus = errAny?.statusCode ?? errAny?.response?.status
+  const is404 = errStatus === 404
   return (
-    <div>
-      <button
-        onClick={(e) => {
-          e.stopPropagation()
-          onToggle()
-        }}
-        className={`flex items-center gap-1 text-[10px] font-medium transition-colors hover:text-[#1E5EFF] ${active ? 'text-[#1E5EFF]' : mutedText}`}
-      >
-        <ChevronRight className={`w-3 h-3 transition-transform ${active ? 'rotate-90' : ''}`} />
-        {active ? '收起执行详情' : '查看执行详情'}
-      </button>
-      {active && (
-        <div onClick={(e) => e.stopPropagation()} className="mt-1.5 space-y-1.5">
-          {loading ? (
-            <div className="flex items-center justify-center py-4">
-              <Spin />
-            </div>
-          ) : error ? (
-            <div className={`text-[10px] ${theme === 'dark' ? 'text-[#EF4444]' : 'text-red-500'}`}>
-              加载失败：{(error as { message?: string })?.message ?? '请稍后重试'}
-            </div>
-          ) : timeline ? (
-            <>
-              {messageCount !== undefined && messageCount > 0 && (
-                <div className={`text-[10px] ${mutedText}`}>消息数 {messageCount}</div>
-              )}
-              <AgentTimeline entries={timeline} theme={theme} />
-            </>
-          ) : null}
+    <div onClick={(e) => e.stopPropagation()} className="mt-2">
+      <div className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${mutedText} mb-1.5`}>
+        <Workflow size={11} /> Agent 执行明细
+      </div>
+      {isLoading ? (
+        <div className="flex items-center justify-center py-3">
+          <Spin />
         </div>
+      ) : error ? (
+        <div className={`text-[10px] italic ${theme === 'dark' ? 'text-[#71717a]' : 'text-slate-400'}`}>
+          {is404 ? '该节点暂无执行记录' : `加载失败：${errAny?.message ?? '请稍后重试'}`}
+        </div>
+      ) : nodeTimeline?.timeline?.length ? (
+        <div className="space-y-1.5">
+          {nodeTimeline.message_count ? (
+            <div className={`text-[10px] ${mutedText}`}>消息数 {nodeTimeline.message_count}</div>
+          ) : null}
+          <AgentTimeline entries={nodeTimeline.timeline} theme={theme} />
+        </div>
+      ) : (
+        <div className={`text-[10px] italic ${mutedText}`}>该节点暂无执行记录</div>
       )}
     </div>
   )

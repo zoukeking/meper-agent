@@ -402,6 +402,53 @@ class TaskService:
             logger.warning("task_checkpointer_cleanup_failed", task_id=task_id, error=str(exc))
 
     @staticmethod
+    async def _clear_checkpointer_threads(task_id: str, node_ids: set[str]) -> None:
+        """Clear LangGraph checkpointer threads for the given node IDs.
+
+        Scoped counterpart of the checkpointer cleanup in
+        :meth:`_cleanup_task_artifacts`: instead of deleting every thread under
+        ``{task_id}_`` (which would wipe upstream nodes' history too), this
+        deletes only the threads ``{task_id}_{node_id}`` for the supplied
+        nodes. Used by :meth:`rewind_task` to clear the trimmed (target +
+        downstream) nodes' threads so that re-execution starts a fresh agent
+        conversation instead of appending to stale history (which would cause
+        "Received multiple non-consecutive system messages").
+
+        Non-agent nodes have no checkpointer thread, so deleting their
+        (absent) thread is a harmless no-op.
+
+        Args:
+            task_id: Task ID.
+            node_ids: Node IDs whose threads to delete (typically the rewind
+                trim set).
+        """
+        if not node_ids:
+            return
+        try:
+            from app.engine.harness_integration import get_checkpointer
+
+            checkpointer = get_checkpointer()
+            cp_col = getattr(checkpointer, "checkpoint_collection", None)
+            writes_col = getattr(checkpointer, "writes_collection", None)
+            thread_ids = [f"{task_id}_{nid}" for nid in node_ids]
+            thread_filter = {"thread_id": {"$in": thread_ids}}
+            if cp_col is not None:
+                cp_col.delete_many(thread_filter)
+            if writes_col is not None:
+                writes_col.delete_many(thread_filter)
+            logger.info(
+                "rewind_checkpointer_cleared",
+                task_id=task_id,
+                node_count=len(node_ids),
+                thread_ids=thread_ids,
+            )
+        except Exception as exc:
+            # Cleanup is best-effort: if the checkpointer is unavailable, the
+            # rewind still proceeds (resume may fail with the system-message
+            # error, which is a clearer signal than blocking the rewind here).
+            logger.warning("rewind_checkpointer_clear_failed", task_id=task_id, error=str(exc))
+
+    @staticmethod
     async def delete_task(task_id: str) -> bool:
         """Delete a terminal Task.
 
@@ -831,6 +878,283 @@ class TaskService:
                 {"_id": task_id},
                 {"$set": checkpoint_sync},
             )
+
+        return updated
+
+    @staticmethod
+    def _compute_downstream_nodes(workflow_doc: dict, target_node_id: str) -> set[str]:
+        """Return all downstream node IDs of ``target_node_id`` (excluding target itself).
+
+        Traverses ``node.config.next_nodes`` via DFS (traversal order is
+        irrelevant for transitive closure).
+
+        LIMITATION: only ``config.next_nodes`` is traversed. Gateway and
+        parallel nodes store their routing targets elsewhere
+        (``config.conditions[].target``/``config.default_branch`` for gateway,
+        ``config.branches[].start_node`` for parallel) and
+        ``_migrate_edges_to_next_nodes`` (engine.py) never back-fills
+        ``next_nodes`` for those node types. As a result the downstream of a
+        gateway/parallel node — or of any node whose path crosses one — is
+        under-computed: those branches are NOT trimmed from
+        ``completed_nodes`` and on resume are silently skipped rather than
+        re-executed. This is an accepted V1 non-goal (rewind spec §1.2).
+        Rewind across gateway/parallel should therefore be used with care.
+
+        Defends against cycles (though the workflow validator forbids them)
+        via a ``visited`` set, and skips next-targets that are not defined as
+        nodes in the workflow.
+
+        Args:
+            workflow_doc: Raw workflow MongoDB document (must contain ``nodes``).
+            target_node_id: Node to compute downstream of.
+
+        Returns:
+            Set of node IDs reachable from ``target_node_id`` via
+            ``config.next_nodes`` (never includes ``target_node_id`` itself).
+        """
+        node_map = {n["node_id"]: n for n in workflow_doc.get("nodes", [])}
+        visited: set[str] = set()
+        stack: list[str] = [target_node_id]
+        while stack:
+            cur = stack.pop()
+            node = node_map.get(cur)
+            if not node:
+                continue
+            for nxt in (node.get("config") or {}).get("next_nodes") or []:
+                target = nxt.get("target") if isinstance(nxt, dict) else None
+                if (
+                    target
+                    and target not in visited
+                    and target in node_map
+                ):
+                    visited.add(target)
+                    stack.append(target)
+        return visited - {target_node_id}
+
+    @staticmethod
+    async def rewind_task(
+        task_id: str,
+        target_node_id: str,
+        variables: dict[str, Any] | None,
+        comment: str | dict[str, Any] | None,
+        triggered_by: str,
+        version: int,
+    ) -> dict:
+        """Rewind a WAITING_HUMAN task back to ``target_node_id`` and resume.
+
+        Trims ``target_node_id`` and ALL its downstream nodes from the
+        checkpoint's ``completed_nodes`` and ``variable_snapshot``, optionally
+        merges ``variables`` into the pool, then atomically transitions
+        WAITING_HUMAN → RUNNING (optimistic lock on ``version``) and triggers
+        ``resume_task_execution``. The engine then re-executes the target node
+        and its whole downstream subgraph (untrimmed nodes are skipped).
+
+        See ``docs/superpowers/specs/2026-07-17-human-node-rewind-design.md`` §6.
+
+        Args:
+            task_id: Task ID.
+            target_node_id: Node to rewind to (must be in completed_nodes).
+            variables: Optional dict to merge into the variable pool.
+            comment: Optional audit comment (str or structured dict).
+            triggered_by: User/system ID triggering the rewind.
+            version: Expected current version for optimistic locking.
+
+        Returns:
+            Updated Task MongoDB document.
+
+        Raises:
+            ConflictError: Task not WAITING_HUMAN, no checkpoint, or version
+                conflict (status changed concurrently).
+            ValidationError: target_node_id not provided, not in
+                completed_nodes, or equals current paused_at_node.
+        """
+        db = get_database()
+
+        # ── 1. Load task ──
+        task_doc = await db["tasks"].find_one({"_id": task_id})
+        if task_doc is None:
+            raise NotFoundError(
+                code="TASK_NOT_FOUND",
+                message=f"任务 {task_id} 不存在",
+                details={"task_id": task_id},
+            )
+
+        from_status = task_doc.get("status")
+
+        # ── 2. Validate status ──
+        if from_status != TaskStatus.WAITING_HUMAN.value:
+            raise ConflictError(
+                code="TASK_NOT_WAITING_HUMAN",
+                message=f"任务当前状态为 {from_status},无法执行 rewind（仅 waiting_human 可退回）",
+                details={"task_id": task_id, "status": from_status},
+            )
+
+        # ── 3. Validate checkpoint ──
+        checkpoint = task_doc.get("checkpoint")
+        if not checkpoint:
+            raise ConflictError(
+                code="TASK_NO_CHECKPOINT",
+                message="任务无可回退的执行上下文（checkpoint 不存在）",
+                details={"task_id": task_id},
+            )
+
+        completed_nodes: list[str] = list(checkpoint.get("completed_nodes", []))
+        paused_at_node = checkpoint.get("paused_at_node", "")
+        variable_snapshot: dict[str, Any] = dict(checkpoint.get("variable_snapshot", {}))
+
+        # ── 4. Validate target_node_id ──
+        if not target_node_id:
+            raise ValidationError(
+                code="REWIND_NO_TARGET",
+                message="rewind 操作必须指定 target_node_id",
+                details={"task_id": task_id},
+            )
+        # Check paused_at_node FIRST to surface the more precise "当前暂停"
+        # error when the user targets the paused node itself. (The paused human
+        # node IS in completed_nodes — engine.py:767 adds it before the
+        # checkpoint is saved at engine.py:806 — so reversing these two checks
+        # wouldn't misfire, but reporting "未执行过" for the current pause node
+        # would be a confusing message.)
+        if target_node_id == paused_at_node:
+            raise ValidationError(
+                code="REWIND_TARGET_IS_CURRENT",
+                message="不能退回到当前暂停的节点",
+                details={"task_id": task_id, "target_node_id": target_node_id},
+            )
+        if target_node_id not in completed_nodes:
+            raise ValidationError(
+                code="REWIND_TARGET_NOT_EXECUTED",
+                message=f"目标节点 {target_node_id} 未执行过，无法回退",
+                details={"task_id": task_id, "target_node_id": target_node_id},
+            )
+
+        # ── 5. Compute trim set R = {target} ∪ downstream ──
+        workflow_doc = await db["workflows"].find_one({"_id": task_doc.get("workflow_id", "")})
+        if workflow_doc is None:
+            raise NotFoundError(
+                code="WORKFLOW_NOT_FOUND",
+                message=f"工作流 {task_doc.get('workflow_id', '')} 不存在",
+                details={"task_id": task_id},
+            )
+        downstream = TaskService._compute_downstream_nodes(workflow_doc, target_node_id)
+        trim_set = {target_node_id} | downstream
+
+        # ── 6. Compute trimmed state in memory ──
+        new_completed = [n for n in completed_nodes if n not in trim_set]
+        new_snapshot = {k: v for k, v in variable_snapshot.items() if k not in trim_set}
+
+        now = utc_now()
+        new_version = version + 1
+
+        # ── 7. Build single atomic update ──
+        set_ops: dict[str, Any] = {
+            "status": TaskStatus.RUNNING.value,
+            "updated_at": now,
+            "version": new_version,
+            "checkpoint.paused_at_node": target_node_id,
+            "checkpoint.completed_nodes": new_completed,
+            "checkpoint.variable_snapshot": new_snapshot,
+            "checkpoint.human_context": {},
+            # agent_thread_id must already be empty for a human-pause checkpoint;
+            # clear defensively in case of legacy data.
+            "checkpoint.agent_thread_id": "",
+        }
+
+        timeline_entry = TimelineEvent(
+            timestamp=now,
+            event_type="rewoun",
+            data={
+                "node_id": target_node_id,
+                "rewound_nodes": sorted(trim_set),
+                "comment": comment,
+                "triggered_by": triggered_by,
+            },
+            actor=triggered_by,
+        ).model_dump(mode="json")
+
+        push_ops: dict[str, Any] = {
+            "timeline": timeline_entry,
+        }
+
+        # Merge optional variables. IMPORTANT: also merge into the checkpoint
+        # variable_snapshot, because resume_from_checkpoint builds its
+        # VariablePool exclusively from checkpoint.variable_snapshot
+        # (engine.py:458-463) and never reads the top-level task.variables.
+        # Without this, overriding an upstream (non-trimmed) node's value
+        # would be lost on resume. (Mirrors the sync done in update_variables.)
+        if variables:
+            overridden_keys: list[str] = []
+            for key, value in variables.items():
+                set_ops[f"variables.{key}"] = value
+                new_snapshot[key] = value
+                overridden_keys.append(key)
+            set_ops["checkpoint.variable_snapshot"] = new_snapshot  # keep in sync
+            timeline_entry["data"]["variables_overridden"] = overridden_keys
+            push_ops["variable_snapshots"] = {
+                "timestamp": now,
+                "variables": variables,
+                "reason": f"rewind to {target_node_id}",
+                "triggered_by": triggered_by,
+            }
+
+        update = {"$set": set_ops, "$push": push_ops}
+
+        # ── 8. Atomic write with optimistic lock ──
+        if not is_valid_transition(TaskStatus(from_status), TaskStatus.RUNNING):
+            raise ConflictError(
+                code="TASK_INVALID_TRANSITION",
+                message=f"任务 {task_id} 不允许从 {from_status} 转换到 running",
+                details={"task_id": task_id, "from_status": from_status, "to_status": "running"},
+            )
+
+        updated = await db["tasks"].find_one_and_update(
+            {"_id": task_id, "version": version},
+            update,
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated is None:
+            raise ConflictError(
+                code="TASK_VERSION_CONFLICT",
+                message="任务状态已变更，请重新获取最新状态后重试",
+                details={"task_id": task_id},
+            )
+
+        # ── 9. Audit log ──
+        await TaskService._write_audit_log(
+            task_id=task_id,
+            event_type="rewind",
+            from_status=from_status,
+            to_status=TaskStatus.RUNNING.value,
+            action="rewind",
+            triggered_by=triggered_by,
+            triggered_by_type="user",
+            version=new_version,
+            details={
+                "target_node_id": target_node_id,
+                "rewound_nodes": sorted(trim_set),
+                "variables_provided": bool(variables),
+            },
+        )
+
+        logger.info(
+            "task_rewind",
+            task_id=task_id,
+            target_node=target_node_id,
+            rewound_count=len(trim_set),
+            version=new_version,
+        )
+
+        # ── 10. Clear LangGraph checkpointer threads for trimmed nodes ──
+        # Without this, re-executing a trimmed agent node reuses its stale
+        # thread ({task_id}_{node_id}) and the add_messages reducer appends a
+        # fresh SystemMessage after the old history, producing non-consecutive
+        # system messages → "Received multiple non-consecutive system messages".
+        # (retry avoids this via _cleanup_task_artifacts; rewind must do the
+        # same, scoped to the trimmed nodes so upstream threads are preserved.)
+        await TaskService._clear_checkpointer_threads(task_id, trim_set)
+
+        # ── 11. Resume (fire-and-forget) ──
+        TaskService.resume_task_execution(task_id)
 
         return updated
 

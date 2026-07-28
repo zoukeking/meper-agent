@@ -7,6 +7,7 @@ The API layer (agents.py) delegates here for all execution-related flows.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from typing import Any
 
@@ -31,6 +32,11 @@ from app.services.message_converters import (
 from app.services.session_service import MessageService, SessionService
 
 
+def _now_ms() -> int:
+    """Current epoch time in milliseconds (for execution-latency timing)."""
+    return int(time.time() * 1000)
+
+
 class AgentExecutionService:
     """Orchestrates agent execution: session, persistence, prompt, harness."""
 
@@ -45,6 +51,7 @@ class AgentExecutionService:
         user_id: str,
         *,
         external_call_chain: list[str] | None = None,
+        user_token: str | None = None,
     ) -> ExecutionResponse:
         """Execute an agent synchronously and persist the result.
 
@@ -59,6 +66,7 @@ class AgentExecutionService:
         session_id = await _resolve_session(agent_id, body, user_id)
         request_id = str(uuid.uuid4())
         call_chain = [*(external_call_chain or []), agent_id]
+        start_time_ms = _now_ms()
 
         # Build messages (system prompt + user input with file attachments)
         system_text = await _build_system_prompt_checked(exec_doc)
@@ -73,11 +81,25 @@ class AgentExecutionService:
             external_call_chain, initial_messages,
         )
 
-        result = await harness_invoke(
-            exec_doc, initial_state,
-            enable_thinking=body.enable_thinking,
-            legacy_records=legacy_records,
-        )
+        run_error: BaseException | None = None
+        try:
+            result = await harness_invoke(
+                exec_doc, initial_state,
+                enable_thinking=body.enable_thinking,
+                legacy_records=legacy_records,
+                user_token=user_token,
+            )
+        except Exception as exc:
+            run_error = exc
+            result = {}
+            raise
+        finally:
+            # Unified execution log (all channels) + ext audit log (ext only).
+            await _record_execution_log(
+                user_id=user_id, agent_id=agent_id, session_id=session_id,
+                request_id=request_id, start_time_ms=start_time_ms,
+                token_usage=result.get("usage"), error=run_error,
+            )
 
         # Extract output + persist agent message
         output_text = extract_final_answer(result.get("messages", []))
@@ -108,6 +130,7 @@ class AgentExecutionService:
         user_id: str,
         *,
         external_call_chain: list[str] | None = None,
+        user_token: str | None = None,
     ) -> tuple[asyncio.Queue, str, str]:
         """Start a streaming agent execution in the background.
 
@@ -135,6 +158,7 @@ class AgentExecutionService:
             await event_queue.put(f"data: {safe_json(event)}\n\n")
 
         async def _run():
+            start_time_ms = _now_ms()
             user_content = await _build_user_content(body, user_id, session_id)
             initial_messages = _assemble_messages(system_text, user_content)
             legacy_records = await _load_legacy_records(session_id, body.input)
@@ -143,12 +167,14 @@ class AgentExecutionService:
                 agent_id, session_id, user_id, request_id, call_chain,
                 external_call_chain, initial_messages, execution_path="react",
             )
+            run_error: BaseException | None = None
             try:
                 result = await harness_stream(
                     exec_doc, initial_state,
                     on_event=_on_event,
                     enable_thinking=body.enable_thinking,
                     legacy_records=legacy_records,
+                    user_token=user_token,
                 )
                 logger.info(
                     "agent_stream_completed",
@@ -156,14 +182,32 @@ class AgentExecutionService:
                     step_count=result.get("step_count", 0),
                 )
             except Exception as exc:
+                run_error = exc
                 logger.error("agent_stream_error", agent_id=agent_id, request_id=request_id, error=str(exc))
                 logger.exception("agent_stream_error_traceback")
-                await event_queue.put(f"data: {safe_json({'type': 'error', 'content': str(exc)})}\n\n")
+                # 走 ErrorEvent schema 保留 source 字段，前端可据此区分
+                # 错误来源（llm/tool/graph），不再丢字段。
+                from app.engine.harness_integration.adapters.app_event import ErrorEvent
+
+                err_evt = ErrorEvent(
+                    message=str(exc),
+                    source=_classify_error_source(exc),
+                ).model_dump()
+                # 前端契约用 content，ErrorEvent 用 message，做字段重映射
+                err_evt["content"] = err_evt.pop("message", "")
+                collected_timeline.append(err_evt)   # 持久化到 agent 消息，供历史回填
+                await event_queue.put(f"data: {safe_json(err_evt)}\n\n")
                 result = {}
             finally:
                 await _persist_agent_message(
                     session_id, collected_timeline,
                     token_usage=result.get("usage"),
+                )
+                # Unified execution log (all channels) + ext audit log (ext only).
+                await _record_execution_log(
+                    user_id=user_id, agent_id=agent_id, session_id=session_id,
+                    request_id=request_id, start_time_ms=start_time_ms,
+                    token_usage=result.get("usage"), error=run_error,
                 )
                 await event_queue.put(
                     f"data: {safe_json({'done': True, 'request_id': request_id, 'session_id': session_id, 'usage': result.get('usage', {})})}\n\n"
@@ -182,6 +226,8 @@ class AgentExecutionService:
         agent_id: str,
         body: ResumeRequest,
         user_id: str,
+        *,
+        user_token: str | None = None,
     ) -> tuple[asyncio.Queue, str, str]:
         """Resume an interrupted agent and stream the continued execution."""
         from app.engine.harness_integration import resume as harness_resume
@@ -207,19 +253,31 @@ class AgentExecutionService:
             await event_queue.put(f"data: {safe_json(event)}\n\n")
 
         async def _run():
+            start_time_ms = _now_ms()
             state = {
                 "messages": [], "agent_id": agent_id,
                 "session_id": session_id, "user_id": user_id,
             }
+            run_error: BaseException | None = None
             try:
                 result = await harness_resume(
                     exec_doc, state, _on_event, body.answer,
                     enable_thinking=body.enable_thinking,
+                    user_token=user_token,
                 )
             except Exception as exc:
+                run_error = exc
                 logger.error("agent_resume_error", agent_id=agent_id, error=str(exc))
                 logger.exception("agent_resume_error_traceback")
-                await event_queue.put(f"data: {safe_json({'type': 'error', 'content': str(exc)})}\n\n")
+                from app.engine.harness_integration.adapters.app_event import ErrorEvent
+
+                err_evt = ErrorEvent(
+                    message=str(exc),
+                    source=_classify_error_source(exc),
+                ).model_dump()
+                err_evt["content"] = err_evt.pop("message", "")
+                collected_timeline.append(err_evt)   # 持久化到 agent 消息，供历史回填
+                await event_queue.put(f"data: {safe_json(err_evt)}\n\n")
                 result = {}
             finally:
                 await _persist_agent_message(
@@ -227,6 +285,12 @@ class AgentExecutionService:
                     extra_filter_types=("interrupt",),
                     token_usage=result.get("usage"),
                     append_to_last_agent=True,
+                )
+                # Unified execution log (all channels) + ext audit log (ext only).
+                await _record_execution_log(
+                    user_id=user_id, agent_id=agent_id, session_id=session_id,
+                    request_id=request_id, start_time_ms=start_time_ms,
+                    token_usage=result.get("usage"), error=run_error,
                 )
                 await event_queue.put(
                     f"data: {safe_json({'done': True, 'request_id': request_id, 'session_id': session_id, 'usage': result.get('usage', {})})}\n\n"
@@ -334,6 +398,42 @@ def _build_initial_state(
     }
 
 
+# LLM 类异常的类型名关键词（主流 LLM 库：openai / anthropic / 通义等）。
+# 这些异常在模型欠费、限流、超时、鉴权失败时抛出。
+_LLM_ERROR_TYPE_KEYWORDS = (
+    "ratelimit", "rate_limit", "apitimeout", "authentication",
+    "permissiondenied", "insufficient_quota", "quotaexceeded",
+    "connection", "timeout",
+)
+# 错误消息中的 LLM 类关键词。
+_LLM_ERROR_MSG_KEYWORDS = (
+    "rate limit", "quota", "insufficient_quota", "余额不足", "欠费",
+    "api key", "invalid_api_key", "authentication",
+    "model_not_found", "context_length_exceeded",
+)
+
+
+def _classify_error_source(exc: BaseException) -> str:
+    """根据异常类型/消息判定错误来源，供前端区分展示。
+
+    返回 "llm"（模型欠费/限流/超时/鉴权）、"tool"（工具加载/配置错误）、
+    或 "graph"（其余含服务端内部异常）。
+
+    注意：按"所有错误都暴露给前端"的原则，这里只分类来源，不脱敏——
+    顶层异常的 str(exc) 会原样发给前端。
+    """
+    type_name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+
+    # LLM 类异常：匹配类型名或消息关键词
+    if any(kw in type_name for kw in _LLM_ERROR_TYPE_KEYWORDS):
+        return "llm"
+    if any(kw in msg for kw in _LLM_ERROR_MSG_KEYWORDS):
+        return "llm"
+
+    return "graph"
+
+
 async def _persist_agent_message(
     session_id: str,
     collected_timeline: list[dict],
@@ -371,6 +471,69 @@ async def _persist_agent_message(
                 await SessionService.add_tokens(session_id, token_usage["total_tokens"])
         except Exception as exc:
             logger.error("agent_stream_persist_error", error=str(exc))
+
+
+async def _record_execution_log(
+    *,
+    user_id: str,
+    agent_id: str,
+    session_id: str,
+    request_id: str,
+    start_time_ms: int,
+    token_usage: dict | None,
+    error: BaseException | None = None,
+) -> None:
+    """Write one unified execution_logs record for ANY agent call.
+
+    Writes unconditionally for internal / api_key / im calls alike. Channel
+    (source) is derived from ``user_id`` by the service. External-only
+    fields (api_key_id / user_sub / endpoint / visitor_id) are pulled from
+    the stashed ExtCallContext when present, and the context is marked
+    consumed so the stats middleware fallback skips the duplicate write.
+
+    Failure is logged but never raised — execution logging must not
+    break the user-facing request flow.
+    """
+    import time as _time
+
+    from app.services.execution_log_service import ExecutionLogService
+    from app.services.ext_api_call_log_service import get_ext_call_context
+
+    usage = token_usage or {}
+    latency_ms = int(_time.time() * 1000) - start_time_ms
+    status = "error" if error is not None else "success"
+
+    # External calls carry api_key_id / user_sub / endpoint / visitor_id
+    # in the stashed context.
+    api_key_id = ""
+    user_sub = ""
+    visitor_id = ""
+    endpoint = ""
+    ctx = get_ext_call_context()
+    if ctx is not None:
+        api_key_id = ctx.api_key_id
+        user_sub = ctx.user_sub
+        visitor_id = ctx.visitor_id
+        endpoint = ctx.endpoint
+        ctx.consumed = True  # suppress middleware fallback duplicate
+
+    await ExecutionLogService.write_log(
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        request_id=request_id,
+        api_key_id=api_key_id,
+        user_sub=user_sub,
+        visitor_id=visitor_id,
+        endpoint=endpoint,
+        status=status,
+        status_code=500 if error is not None else 200,
+        latency_ms=latency_ms,
+        total_tokens=int(usage.get("total_tokens") or 0),
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+        llm_calls=int(usage.get("llm_calls") or 0),
+    )
 
 
 __all__ = ["AgentExecutionService"]

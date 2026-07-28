@@ -8,9 +8,13 @@ from app.schemas.api_key import (
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyListResponse,
+    ApiKeyLogItem,
+    ApiKeyLogsResponse,
     ApiKeyResponse,
     ApiKeyStatsResponse,
     ApiKeyUpdate,
+    ApiKeyUsersResponse,
+    ApiKeyUserStats,
 )
 from app.schemas.user import UserResponse
 from app.services.api_key_service import ApiKeyService
@@ -36,6 +40,7 @@ def _doc_to_response(doc: dict) -> ApiKeyResponse:
         status=doc["status"],
         expires_at=doc.get("expires_at"),
         last_used_at=doc.get("last_used_at"),
+        user_info_url=doc.get("user_info_url", ""),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
@@ -59,6 +64,7 @@ async def create_api_key(
         bindings=body.bindings.model_dump(),
         rate_limit=body.rate_limit,
         expires_at=body.expires_at,
+        user_info_url=body.user_info_url or "",
     )
     return ApiKeyCreateResponse(
         id=doc["_id"],
@@ -71,6 +77,7 @@ async def create_api_key(
         rate_limit=doc["rate_limit"],
         status=doc["status"],
         expires_at=doc.get("expires_at"),
+        user_info_url=doc.get("user_info_url", ""),
         created_at=doc["created_at"],
     )
 
@@ -131,6 +138,7 @@ async def update_api_key(
         bindings=body.bindings.model_dump() if body.bindings else None,
         rate_limit=body.rate_limit,
         expires_at=body.expires_at,
+        user_info_url=body.user_info_url,
     )
     if doc is None:
         raise NotFoundError(code="APIKEY_NOT_FOUND", message="API Key not found")
@@ -157,13 +165,104 @@ async def revoke_api_key(api_key_id: str) -> Response:
     response_model=ApiKeyStatsResponse,
     summary="Get API Key call statistics",
 )
-async def get_api_key_stats(api_key_id: str) -> ApiKeyStatsResponse:
-    """Get aggregated call statistics for an API Key."""
+async def get_api_key_stats(
+    api_key_id: str,
+    start: str | None = None,
+    end: str | None = None,
+) -> ApiKeyStatsResponse:
+    """Get aggregated call statistics + token consumption for an API Key."""
     from app.core.errors import NotFoundError
 
     doc = await ApiKeyService.get_api_key(api_key_id)
     if doc is None:
         raise NotFoundError(code="APIKEY_NOT_FOUND", message="API Key not found")
 
+    # Existing Redis-backed call counter (total_requests / successful / failed / by_endpoint).
     stats = await get_stats(api_key_id)
-    return ApiKeyStatsResponse(**stats)
+
+    # Token consumption + unique-user count from execution_logs (api_key channel).
+    from app.services.execution_log_service import ExecutionLogService
+
+    token_summary = await ExecutionLogService.get_token_summary_by_api_key(
+        api_key_id, start=start, end=end,
+    )
+    users = await ExecutionLogService.get_users_summary_by_api_key(api_key_id, period_days=30)
+
+    return ApiKeyStatsResponse(
+        **stats,
+        total_tokens=token_summary["total_tokens"],
+        input_tokens=token_summary["input_tokens"],
+        output_tokens=token_summary["output_tokens"],
+        unique_users=len(users),
+    )
+
+
+@router.get(
+    "/{api_key_id}/logs",
+    response_model=ApiKeyLogsResponse,
+    summary="List API Key call logs",
+)
+async def list_api_key_logs(
+    api_key_id: str,
+    user_sub: str | None = None,
+    visitor_id: str | None = None,
+    session_id: str | None = None,
+    endpoint: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> ApiKeyLogsResponse:
+    """Paginated call-detail logs for an API Key (audit + token debugging)."""
+    from app.core.errors import NotFoundError
+
+    doc = await ApiKeyService.get_api_key(api_key_id)
+    if doc is None:
+        raise NotFoundError(code="APIKEY_NOT_FOUND", message="API Key not found")
+
+    from app.services.execution_log_service import ExecutionLogService
+
+    items, total = await ExecutionLogService.list_logs_by_api_key(
+        api_key_id,
+        user_sub=user_sub,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        endpoint=endpoint,
+        start=start,
+        end=end,
+        page=page,
+        page_size=page_size,
+    )
+    return ApiKeyLogsResponse(
+        items=[ApiKeyLogItem(**it) for it in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/{api_key_id}/users",
+    response_model=ApiKeyUsersResponse,
+    summary="List active end-users for an API Key",
+)
+async def list_api_key_users(
+    api_key_id: str,
+    period_days: int = 7,
+) -> ApiKeyUsersResponse:
+    """Active end-users (callback-verification mode) ranked by token usage."""
+    from app.core.errors import NotFoundError
+
+    doc = await ApiKeyService.get_api_key(api_key_id)
+    if doc is None:
+        raise NotFoundError(code="APIKEY_NOT_FOUND", message="API Key not found")
+
+    from app.services.execution_log_service import ExecutionLogService
+
+    rows = await ExecutionLogService.get_users_summary_by_api_key(
+        api_key_id, period_days=period_days,
+    )
+    return ApiKeyUsersResponse(
+        items=[ApiKeyUserStats(**r) for r in rows],
+        period_days=period_days,
+    )

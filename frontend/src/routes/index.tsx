@@ -16,9 +16,10 @@ import WorkflowsPage from '../pages/workflows-page'
 import WorkflowDetailPage from '../pages/workflow-detail-page'
 import ToolsPage from '../pages/tools-page'
 import SkillDetailPage from '../pages/skill-detail-page'
-import ExecutionLogsPage from '../pages/execution-logs-page'
+import ExecutionStatsPage from '../pages/execution-stats-page'
 import ApiKeysPage from '../pages/api-keys-page'
 import CredentialsPage from '../pages/credentials-page'
+import ChannelsPage from '../pages/channels-page'
 import UsersPage from '../pages/users-page'
 import RolesPage from '../pages/roles-page'
 import SettingsPage from '../pages/settings-page'
@@ -45,9 +46,10 @@ export const routes = [
           { path: '/workflows/:id', element: <WorkflowDetailPage /> },
           { path: '/tools', element: <ToolsPage /> },
           { path: '/skills/:id', element: <SkillDetailPage /> },
-          { path: '/execution-logs', element: <ExecutionLogsPage /> },
+          { path: '/execution-stats', element: <ExecutionStatsPage /> },
           { path: '/api-keys', element: <ApiKeysPage /> },
           { path: '/credentials', element: <CredentialsPage /> },
+          { path: '/channels', element: <ChannelsPage /> },
           { path: '/users', element: <UsersPage /> },
           { path: '/roles', element: <RolesPage /> },
           { path: '/settings', element: <SettingsPage /> },

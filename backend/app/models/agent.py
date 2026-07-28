@@ -16,6 +16,13 @@ class AgentStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class RecommendedItem(BaseModel):
+    """终端用户首屏推荐问题/操作快捷项。"""
+
+    label: str = Field(..., min_length=1, max_length=100, description="按钮显示文案")
+    prompt: str = Field(default="", max_length=500, description="实际发送内容；留空则用 label")
+
+
 class Agent(BaseModel):
     """MongoDB agent document model.
 
@@ -39,6 +46,12 @@ class Agent(BaseModel):
     id: str = Field(default_factory=lambda: generate_id("agent"), alias="_id")
     name: str = Field(..., min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
+    welcome_message: str = Field(
+        default="", max_length=2000, description="终端用户首屏欢迎词（Markdown）"
+    )
+    recommended_items: list[RecommendedItem] = Field(
+        default_factory=list, max_length=10, description="首屏推荐问题/操作快捷项（≤10 条）"
+    )
     prompt_slots: dict[str, str] = Field(default_factory=dict)
     # --- Deprecated: kept for backward compat ---
     tool_ids: list[str] = Field(default_factory=list)

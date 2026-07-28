@@ -50,12 +50,16 @@ _TOOL_ERROR_KINDS = ("on_tool_error",)
 
 
 def _extract_interrupt(error: Any) -> dict[str, Any] | None:
-    """Check if *error* is a GraphInterrupt carrying an ask_clarification payload.
+    """Check if *error* is a GraphInterrupt carrying an interrupt payload.
 
     LangGraph 1.2.x surfaces interrupt() inside a tool as ``on_tool_error``
     with the ``GraphInterrupt`` object in ``data["error"]``.
     ``GraphInterrupt.args[0]`` is a tuple of ``Interrupt`` objects,
     each carrying a ``value`` dict with the interrupt payload.
+
+    Recognised payloads (identified by their ``type`` field):
+    - ``ask_clarification`` (no explicit type, carries ``question``)
+    - ``workflow_confirmation`` (``confirm_workflow`` tool)
     """
     # GraphInterrupt stores interrupts tuple in args[0]
     raw = None
@@ -69,9 +73,40 @@ def _extract_interrupt(error: Any) -> dict[str, Any] | None:
     items = raw if isinstance(raw, tuple) else (raw,)
     for intr in items:
         value = getattr(intr, "value", None)
-        if isinstance(value, dict) and "question" in value:
+        if not isinstance(value, dict):
+            continue
+        # ask_clarification carries "question"; confirm_workflow carries
+        # type="workflow_confirmation". Accept either.
+        if "question" in value or value.get("type") == "workflow_confirmation":
             return value
     return None
+
+
+def _build_interrupt_event(payload: dict[str, Any], *, interrupt_id: str = "") -> InterruptEvent:
+    """Build an :class:`InterruptEvent` from a raw interrupt ``payload``.
+
+    Dispatches on ``payload["type"]``: ``workflow_confirmation`` (from
+    ``confirm_workflow``) fills the workflow fields; anything else is
+    treated as an ``ask_clarification`` payload and fills the question/
+    options/fields fields.
+    """
+    if payload.get("type") == "workflow_confirmation":
+        return InterruptEvent(
+            kind="workflow_confirmation",
+            workflow_name=payload.get("workflow_name", ""),
+            workflow_description=payload.get("workflow_description", ""),
+            input_preview=payload.get("input_preview"),
+            interrupt_id=interrupt_id,
+        )
+    return InterruptEvent(
+        kind="clarification",
+        question=payload.get("question", ""),
+        clarification_type=payload.get("type", "missing_info"),
+        context=payload.get("context"),
+        options=payload.get("options"),
+        fields=payload.get("fields"),
+        interrupt_id=interrupt_id,
+    )
 
 
 async def stream_events_to_app_events(
@@ -163,10 +198,15 @@ async def stream_events_to_app_events(
                 content = str(output.content)
             else:
                 content = str(output)
+            # 检查 ToolMessage 的 status：tool_wrapper 把 ToolException 转成
+            # status="error" 的 ToolMessage 回传 LLM。这里同步透传给前端，
+            # 让前端能结构化区分工具成功/失败，不再靠正则嗅探文本。
+            status = "error" if getattr(output, "status", None) == "error" else "success"
             await on_event(
                 ToolResultEvent(
                     tool_name=tool_name,
                     content=content,
+                    status=status,
                 )
             )
 
@@ -177,29 +217,25 @@ async def stream_events_to_app_events(
 
         elif kind in _TOOL_ERROR_KINDS:
             # Check if the "error" is actually a GraphInterrupt (from
-            # ask_clarification's interrupt() call inside a tool).
-            # LangGraph 1.2.x surfaces this as on_tool_error with the
-            # GraphInterrupt object in data["error"], rather than as
-            # __interrupt__ in on_chain_end (which only ainvoke does).
+            # ask_clarification's / confirm_workflow's interrupt() call
+            # inside a tool). LangGraph 1.2.x surfaces this as
+            # on_tool_error with the GraphInterrupt object in
+            # data["error"], rather than as __interrupt__ in on_chain_end
+            # (which only ainvoke does).
             error = data.get("error")
             interrupt_payload = _extract_interrupt(error)
             if interrupt_payload is not None:
-                await on_event(InterruptEvent(
-                    question=interrupt_payload.get("question", ""),
-                    clarification_type=interrupt_payload.get("type", "missing_info"),
-                    context=interrupt_payload.get("context"),
-                    options=interrupt_payload.get("options"),
-                    interrupt_id="",
-                ))
+                await on_event(_build_interrupt_event(interrupt_payload))
             else:
                 await on_event(
                     ErrorEvent(message=_error_message(data), source="tool")
                 )
 
         elif kind == "on_chain_end":
-            # Detect graph-level interrupt (ask_clarification etc.).
-            # LangGraph surfaces an interrupt as a top-level on_chain_end
-            # whose output dict carries a ``__interrupt__`` key.
+            # Detect graph-level interrupt (ask_clarification /
+            # confirm_workflow etc.). LangGraph surfaces an interrupt as a
+            # top-level on_chain_end whose output dict carries a
+            # ``__interrupt__`` key.
             output = data.get("output")
             if isinstance(output, dict):
                 interrupts = output.get("__interrupt__")
@@ -207,12 +243,8 @@ async def stream_events_to_app_events(
                     for intr in interrupts:
                         payload = getattr(intr, "value", intr) or {}
                         if isinstance(payload, dict):
-                            await on_event(InterruptEvent(
-                                question=payload.get("question", ""),
-                                clarification_type=payload.get("type", "missing_info"),
-                                context=payload.get("context"),
-                                options=payload.get("options"),
-                                interrupt_id=getattr(intr, "id", "") or "",
+                            await on_event(_build_interrupt_event(
+                                payload, interrupt_id=getattr(intr, "id", "") or "",
                             ))
 
 

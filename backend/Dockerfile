@@ -44,7 +44,6 @@ COPY packages/harness packages/harness
 # Copy application code
 COPY app/ app/
 COPY scripts/ scripts/
-COPY static/ static/
 COPY pyproject.toml uv.lock .python-version ./
 
 # Create logs directory for non-root user

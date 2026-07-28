@@ -54,6 +54,40 @@ def _decrypt_auth_config(auth_config: dict) -> dict:
     return decrypted
 
 
+# Sentinel value used by _mask_auth_config to redact secrets in API
+# responses. Updates carrying this value (or an empty string) are treated
+# as "unchanged" so the real secret is preserved (see _merge_auth_config).
+_MASKED_VALUE = "***"
+
+
+def _merge_auth_config(existing: dict | None, incoming: dict | None) -> dict:
+    """Field-level merge of auth_config on update.
+
+    The API redacts sensitive fields (api_key / token / password) to
+    ``"***"`` in responses. Before this merge existed, an edit that round-
+    tripped that masked value would overwrite the real secret with the
+    literal string ``"***"``. We now start from the stored (decrypted)
+    config and only apply fields the caller actually changed, skipping
+    masked placeholders and empty strings.
+
+    Args:
+        existing: Stored auth_config (already decrypted). ``None`` → ``{}``.
+        incoming: auth_config from the update request. ``None`` means the
+            caller did not send the field at all → keep everything as-is.
+
+    Returns:
+        Merged auth_config dict (caller re-encrypts sensitive fields).
+    """
+    if incoming is None:
+        return dict(existing or {})
+    merged = dict(existing or {})
+    for k, v in incoming.items():
+        if v == _MASKED_VALUE or v == "":
+            continue  # unchanged / cleared-intent not supported → keep old value
+        merged[k] = v
+    return merged
+
+
 class McpConnectionService:
     """Service layer for MCP connection operations."""
 
@@ -203,7 +237,14 @@ class McpConnectionService:
             "url": data.get("url", existing["url"]),
             "protocol": data.get("protocol", existing.get("protocol", "streamable-http")),
             "auth_type": data.get("auth_type", existing.get("auth_type", "none")),
-            "auth_config": _encrypt_auth_config(data.get("auth_config")) if data.get("auth_config") is not None else existing.get("auth_config", {}),
+            "auth_config": _encrypt_auth_config(
+                # existing 来自 DB 是加密态，必须先解密再合并，否则保留下来的
+                # 旧密文会被 _encrypt_auth_config 二次加密，读取时解密失败。
+                _merge_auth_config(
+                    _decrypt_auth_config(existing.get("auth_config", {})),
+                    data.get("auth_config"),
+                )
+            ),
             "timeout": data.get("timeout", existing.get("timeout", 30)),
             "default_params": data.get("default_params", existing.get("default_params", {})),
             "updated_at": now_iso,

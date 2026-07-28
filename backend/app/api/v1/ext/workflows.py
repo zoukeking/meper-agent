@@ -157,7 +157,11 @@ async def invoke_workflow(
     if body.callback_url:
         ext_metadata["ext_callback_url"] = body.callback_url
 
-    # Create task
+    # Create task.
+    # NOTE: Workflow path keeps owner_user_id as created_by for now —
+    # ExtWorkflowInvokeRequest has no visitor_id/user_token field. End-user
+    # isolation for workflows (using principal.user_id from callback-verification
+    # mode) is deferred to Story P3 (call log + token stats).
     task_doc = await TaskService.create_task(
         workflow_id=workflow_id,
         input_data=body.input,

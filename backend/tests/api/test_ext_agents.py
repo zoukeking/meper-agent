@@ -305,3 +305,205 @@ class TestErrorHandling:
             assert resp.status_code == 401
         finally:
             app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# AC5/AC7/AC8: Callback-verification mode (end-user identity)
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackVerificationMode:
+    """End-user identity via X-User-Token (Story 8.2).
+
+    These tests verify that ``user_id`` reaching AgentExecutionService
+    is composed differently depending on the auth mode:
+    - Legacy mode (user_info_url empty): ``{owner}:{visitor_id}``
+    - Callback mode (user_info_url set): ``{owner}:{sub}`` (visitor_id ignored)
+    """
+
+    def _callback_principal(self) -> ApiKeyPrincipal:
+        """A principal pre-resolved by the auth layer in callback mode."""
+        return ApiKeyPrincipal(
+            key_id="apikey_cb",
+            owner_user_id="user_owner",
+            scopes=["agents:read", "agents:invoke"],
+            bindings={"agents": [], "workflows": []},
+            rate_limit=60,
+            user_info_url="https://partner.example.com/introspect",
+            user_id="user_owner:user-123",  # already resolved by auth layer
+            user_token="user-token-abc",  # retained for MCP forwarding (P2)
+        )
+
+    def test_callback_mode_invoke_uses_sub(self, client) -> None:
+        """AC8: callback mode passes ``{owner}:{sub}`` as user_id."""
+        from app.schemas.execution import ExecutionResponse
+        principal = self._callback_principal()
+        cleanup = _override_auth(principal)
+        try:
+            mock_result = ExecutionResponse(
+                output="ok",
+                execution_path="direct",
+                request_id="req_01",
+                agent_id="agent_01",
+                session_id="sess_01",
+                step_count=1,
+            )
+            with patch(
+                "app.services.agent_execution_service.AgentExecutionService.invoke",
+                new=AsyncMock(return_value=mock_result),
+            ) as mock_invoke:
+                resp = client.post(
+                    "/api/v1/ext/agents/agent_01/invoke",
+                    json={
+                        "message": "hi",
+                        "visitor_id": "ignored-in-callback-mode",
+                    },
+                )
+            assert resp.status_code == 200
+            # user_id should be from principal.user_id (sub-based),
+            # NOT from visitor_id.
+            call_kwargs = mock_invoke.call_args.kwargs
+            assert call_kwargs["user_id"] == "user_owner:user-123"
+            # P2: user_token is also forwarded so MCP loader can透传
+            assert call_kwargs["user_token"] == "user-token-abc"
+        finally:
+            cleanup()
+
+    def test_legacy_mode_invoke_uses_visitor_id(self, client, full_principal) -> None:
+        """AC4/AC8: legacy mode composes user_id from visitor_id."""
+        from app.schemas.execution import ExecutionResponse
+        cleanup = _override_auth(full_principal)
+        try:
+            mock_result = ExecutionResponse(
+                output="ok",
+                execution_path="direct",
+                request_id="req_01",
+                agent_id="agent_01",
+                session_id="sess_01",
+                step_count=1,
+            )
+            with patch(
+                "app.services.agent_execution_service.AgentExecutionService.invoke",
+                new=AsyncMock(return_value=mock_result),
+            ) as mock_invoke:
+                resp = client.post(
+                    "/api/v1/ext/agents/agent_01/invoke",
+                    json={"message": "hi", "visitor_id": "v-abc"},
+                )
+            assert resp.status_code == 200
+            call_kwargs = mock_invoke.call_args.kwargs
+            assert call_kwargs["user_id"] == "user_owner:v-abc"
+        finally:
+            cleanup()
+
+    def test_callback_mode_sessions_query_ignores_visitor_id(self, client) -> None:
+        """AC8: in callback mode, /sessions doesn't need visitor_id query."""
+        principal = self._callback_principal()
+        cleanup = _override_auth(principal)
+        try:
+            with patch(
+                "app.services.session_service.SessionService.list_sessions",
+                new=AsyncMock(return_value=([], 0)),
+            ) as mock_list:
+                # visitor_id omitted — should still work in callback mode.
+                resp = client.get("/api/v1/ext/agents/agent_01/sessions")
+            assert resp.status_code == 200
+            call_kwargs = mock_list.call_args.kwargs
+            assert call_kwargs["user_id"] == "user_owner:user-123"
+        finally:
+            cleanup()
+
+    def test_callback_mode_missing_token_returns_401(self, client) -> None:
+        """AC5/AC9: missing X-User-Token in callback mode → 401 EXT_USER_TOKEN_MISSING."""
+        from app.api.v1.ext import auth_and_rate_limit
+        from app.core.errors import UnauthorizedError
+
+        async def _raise_missing_token():
+            raise UnauthorizedError(
+                code="EXT_USER_TOKEN_MISSING",
+                message="X-User-Token header is required for this API Key.",
+            )
+
+        app.dependency_overrides[auth_and_rate_limit] = _raise_missing_token
+        try:
+            resp = client.post(
+                "/api/v1/ext/agents/agent_01/invoke",
+                json={"message": "hi"},
+            )
+            assert resp.status_code == 401
+            data = resp.json()
+            assert data["error"]["code"] == "EXT_USER_TOKEN_MISSING"
+        finally:
+            app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Create session (external)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSession:
+    """POST /api/v1/ext/agents/{agent_id}/sessions"""
+
+    def _doc(self, user_id: str, agent_id: str = "agent_01") -> dict:
+        return {
+            "_id": "sess_new",
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "title": "",
+            "message_count": 0,
+            "created_at": "2026-01-01T00:00:00",
+            "updated_at": "2026-01-01T00:00:00",
+        }
+
+    def test_create_legacy_uses_visitor_id(self, client, full_principal) -> None:
+        cleanup = _override_auth(full_principal)
+        try:
+            with patch(
+                "app.services.session_service.SessionService.create_session",
+                new=AsyncMock(return_value=self._doc("user_owner:v-abc")),
+            ) as mock_create:
+                resp = client.post(
+                    "/api/v1/ext/agents/agent_01/sessions?visitor_id=v-abc"
+                )
+            assert resp.status_code == 201
+            assert resp.json()["id"] == "sess_new"
+            assert mock_create.call_args.kwargs["user_id"] == "user_owner:v-abc"
+        finally:
+            cleanup()
+
+    def test_create_callback_uses_sub(self, client) -> None:
+        principal = ApiKeyPrincipal(
+            key_id="apikey_cb",
+            owner_user_id="user_owner",
+            scopes=["agents:read", "agents:invoke"],
+            bindings={"agents": [], "workflows": []},
+            user_info_url="https://partner.example.com/introspect",
+            user_id="user_owner:user-123",  # resolved by auth layer
+        )
+        cleanup = _override_auth(principal)
+        try:
+            with patch(
+                "app.services.session_service.SessionService.create_session",
+                new=AsyncMock(return_value=self._doc("user_owner:user-123")),
+            ) as mock_create:
+                # visitor_id omitted — callback mode ignores it
+                resp = client.post("/api/v1/ext/agents/agent_01/sessions")
+            assert resp.status_code == 201
+            assert mock_create.call_args.kwargs["user_id"] == "user_owner:user-123"
+        finally:
+            cleanup()
+
+    def test_create_scope_denied(self, client) -> None:
+        principal = ApiKeyPrincipal(
+            key_id="k",
+            owner_user_id="u",
+            scopes=["agents:read"],  # no agents:invoke
+            bindings={},
+        )
+        cleanup = _override_auth(principal)
+        try:
+            resp = client.post("/api/v1/ext/agents/agent_01/sessions")
+            assert resp.status_code == 403
+        finally:
+            cleanup()

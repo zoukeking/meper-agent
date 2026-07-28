@@ -77,6 +77,7 @@ const GROUPS: NavGroup[] = [
       { label: 'MCP', path: '/mcp', key: 'mcp', permission: 'mcp:read' },
       { label: 'Skill', path: '/skills', key: 'skills', permission: 'skill:read' },
       { label: '凭据', path: '/credentials', key: 'credentials', permission: 'tool:read' },
+      { label: '渠道', path: '/channels', key: 'channels', permission: 'tool:read' },
     ],
   },
   {
@@ -92,7 +93,7 @@ const GROUPS: NavGroup[] = [
     key: 'system', label: '系统信息', icon: <SettingOutlined />,
     children: [
       { label: 'API 密钥', path: '/api-keys', key: 'api-keys', permission: 'apikey:manage' },
-      { label: '执行日志', path: '/execution-logs', key: 'execution-logs', permission: 'execution:read:own' },
+      { label: '执行统计', path: '/execution-stats', key: 'execution-stats', permission: 'apikey:manage' },
       { label: '设置', path: '/settings', key: 'settings', permission: 'settings:manage' },
     ],
   },
@@ -108,10 +109,11 @@ const PATH_TO_GROUP: Record<string, string> = {
   '/tools': 'tools',
   '/mcp': 'tools',
   '/skills': 'tools',
+  '/channels': 'tools',
   '/users': 'users',
   '/roles': 'users',
   '/api-keys': 'system',
-  '/execution-logs': 'system',
+  '/execution-stats': 'system',
   '/settings': 'system',
 }
 

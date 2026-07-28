@@ -34,6 +34,7 @@ from agent_flow_harness.llm import (
     apply_thinking_mode,
     build_client_from_doc,
     build_client_from_env,
+    build_thinking_kwargs,
     supports_thinking,
 )
 from agent_flow_harness.middleware import (
@@ -46,7 +47,13 @@ from agent_flow_harness.middleware import (
     UsageMiddleware,
     resolve_middleware,
 )
-from agent_flow_harness.mcp import McpConnectionConfig, McpToolLoader
+from agent_flow_harness.mcp import (
+    McpConnectionConfig,
+    McpToolLoader,
+    get_user_token_context,
+    reset_user_token_context,
+    set_user_token_context,
+)
 from agent_flow_harness.state import AgentState
 from agent_flow_harness.subagents import (
     SubAgentContext,
@@ -88,8 +95,10 @@ from agent_flow_harness.tools import (
     resolve_variable,
 )
 from agent_flow_harness.slots import (
+    SLOT_NAMES,
     SLOT_SCHEMA,
     SlotDef,
+    TOOL_DECLARATION_SLOT,
     render_system_prompt_full,
     render_system_prompt_simple,
 )
@@ -129,8 +138,10 @@ __all__ = [
     "McpToolLoader",
     "PromptInjectionMiddleware",
     "LocalSandbox",
+    "SLOT_NAMES",
     "SLOT_SCHEMA",
     "SlotDef",
+    "TOOL_DECLARATION_SLOT",
     "SubAgentContext",
     "SubAgentRegistry",
     "SubAgentSpec",
@@ -155,6 +166,7 @@ __all__ = [
     "build_agent_graph",
     "build_client_from_doc",
     "build_client_from_env",
+    "build_thinking_kwargs",
     "build_config",
     "build_mongo_saver",
     "configure_checkpointer",
@@ -164,6 +176,7 @@ __all__ = [
     "get_sandbox_provider",
     "get_subagent_context",
     "get_thread_messages",
+    "get_user_token_context",
     "glob",
     "grep",
     "read",
@@ -171,6 +184,7 @@ __all__ = [
     "reset_sandbox_context",
     "reset_sandbox_provider",
     "reset_subagent_context",
+    "reset_user_token_context",
     "resolve_guards",
     "resolve_middleware",
     "render_system_prompt_full",
@@ -181,6 +195,7 @@ __all__ = [
     "set_sandbox_context",
     "set_sandbox_provider",
     "set_subagent_context",
+    "set_user_token_context",
     "supports_thinking",
     "tool_search",
     "write",

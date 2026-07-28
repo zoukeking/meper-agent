@@ -15,6 +15,7 @@ from app.schemas.file_library import (
 from app.schemas.user import UserResponse
 from app.services.file_service import FileService
 from app.services.file_storage import LocalFileStorage
+from app.utils.http import build_content_disposition
 
 router = APIRouter(
     prefix="/files",
@@ -195,7 +196,7 @@ async def download_file(
     return Response(
         content=data,
         media_type=file_ref.mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{file_ref.name}"'},
+        headers={"Content-Disposition": build_content_disposition(file_ref.name)},
     )
 
 

@@ -69,10 +69,6 @@ export default function SkillsPage() {
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
       message.success('已删除')
     },
-    onError: (err: unknown) => {
-      const error = err as { message?: string }
-      message.error(error?.message ?? '删除失败')
-    },
   })
 
   const handleDelete = (skill: (typeof allSkills)[number]) => {

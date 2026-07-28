@@ -91,8 +91,12 @@ export default function McpPage() {
   const [formDescription, setFormDescription] = useState('')
   const [formUrl, setFormUrl] = useState('')
   const [formProtocol, setFormProtocol] = useState('streamable-http')
-  const [formAuthType, setFormAuthType] = useState('none')
-  const [formAuthConfig, setFormAuthConfig] = useState('')
+  const [formAuthType, setFormAuthType] = useState<McpAuthType>('none')
+  const [formAuthToken, setFormAuthToken] = useState('')           // bearer_token
+  const [formAuthApiKey, setFormAuthApiKey] = useState('')         // api_key 值
+  const [formAuthHeaderName, setFormAuthHeaderName] = useState('') // api_key header 名（选填）
+  const [formAuthUsername, setFormAuthUsername] = useState('')     // basic
+  const [formAuthPassword, setFormAuthPassword] = useState('')     // basic
   const [formDefaultParams, setFormDefaultParams] = useState('')
   const [formTimeout, setFormTimeout] = useState(30)
 
@@ -134,11 +138,6 @@ export default function McpPage() {
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
       setModalOpen(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '创建失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: update ─── */
@@ -159,11 +158,6 @@ export default function McpPage() {
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
       setModalOpen(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '更新失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: delete ─── */
@@ -173,11 +167,6 @@ export default function McpPage() {
       message.success('MCP 连接已删除')
       queryClient.invalidateQueries({ queryKey: mcpKeys.lists() })
       queryClient.invalidateQueries({ queryKey: agentKeys.all })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 
@@ -190,7 +179,11 @@ export default function McpPage() {
     setFormUrl('')
     setFormProtocol('streamable-http')
     setFormAuthType('none')
-    setFormAuthConfig('')
+    setFormAuthToken('')
+    setFormAuthApiKey('')
+    setFormAuthHeaderName('')
+    setFormAuthUsername('')
+    setFormAuthPassword('')
     setFormDefaultParams('')
     setFormTimeout(30)
     setModalOpen(true)
@@ -204,7 +197,13 @@ export default function McpPage() {
     setFormUrl(conn.url)
     setFormProtocol(conn.protocol)
     setFormAuthType(conn.auth_type)
-    setFormAuthConfig(conn.auth_config ? JSON.stringify(conn.auth_config) : '')
+    // 回填结构化认证字段：脱敏值(***)不回填，留空 + placeholder 提示"已配置"。
+    const ac = conn.auth_config || {}
+    setFormAuthToken(ac.token && ac.token !== '***' ? ac.token : '')
+    setFormAuthApiKey(ac.api_key && ac.api_key !== '***' ? ac.api_key : '')
+    setFormAuthHeaderName(typeof ac.header_name === 'string' ? ac.header_name : '')
+    setFormAuthUsername(typeof ac.username === 'string' ? ac.username : '')
+    setFormAuthPassword(ac.password && ac.password !== '***' ? ac.password : '')
     setFormDefaultParams(conn.default_params && Object.keys(conn.default_params).length > 0 ? JSON.stringify(conn.default_params) : '')
     setFormTimeout(conn.timeout)
     setModalOpen(true)
@@ -221,14 +220,17 @@ export default function McpPage() {
       return
     }
 
-    let authConfig = {}
-    if (formAuthConfig.trim()) {
-      try {
-        authConfig = JSON.parse(formAuthConfig)
-      } catch {
-        message.error('认证配置 JSON 格式错误')
-        return
-      }
+    // 按认证方式构造 auth_config：只包含用户实际填了内容的字段。
+    // 空值不放进去 → 后端合并时保留原密钥（编辑场景留空=不修改）。
+    const authConfig: Record<string, string> = {}
+    if (formAuthType === 'api_key') {
+      if (formAuthApiKey.trim()) authConfig.api_key = formAuthApiKey.trim()
+      if (formAuthHeaderName.trim()) authConfig.header_name = formAuthHeaderName.trim()
+    } else if (formAuthType === 'bearer_token') {
+      if (formAuthToken.trim()) authConfig.token = formAuthToken.trim()
+    } else if (formAuthType === 'basic') {
+      if (formAuthUsername.trim()) authConfig.username = formAuthUsername.trim()
+      if (formAuthPassword.trim()) authConfig.password = formAuthPassword.trim()
     }
 
     let defaultParams = {}
@@ -246,7 +248,7 @@ export default function McpPage() {
       description: formDescription.trim(),
       url: formUrl.trim(),
       protocol: formProtocol || 'streamable-http',
-      auth_type: (formAuthType || 'none') as McpAuthType,
+      auth_type: formAuthType,
       auth_config: authConfig,
       default_params: defaultParams,
       timeout: formTimeout || 30,
@@ -590,18 +592,74 @@ export default function McpPage() {
             />
           </div>
 
-          <div>
-            <label className="block text-sm text-[#0F172A] mb-1.5">
-              认证配置（JSON）
-            </label>
-            <Input.TextArea
-              value={formAuthConfig}
-              onChange={(e) => setFormAuthConfig(e.target.value)}
-              placeholder='如：{"api_key": "your-key"}'
-              rows={3}
-            />
-            <div className="text-[11px] text-[#94A3B8] mt-1">请输入有效的 JSON 格式</div>
-          </div>
+          {formAuthType === 'none' && (
+            <div className="text-[11px] text-[#94A3B8]">无需认证配置</div>
+          )}
+
+          {formAuthType === 'api_key' && (
+            <>
+              <div>
+                <label className="block text-sm text-[#0F172A] mb-1.5">
+                  Header 名称
+                </label>
+                <Input
+                  value={formAuthHeaderName}
+                  onChange={(e) => setFormAuthHeaderName(e.target.value)}
+                  placeholder="X-API-Key"
+                />
+                <div className="text-[11px] text-[#94A3B8] mt-1">放置 API Key 的请求头名称，默认 X-API-Key</div>
+              </div>
+              <div>
+                <label className="block text-sm text-[#0F172A] mb-1.5">
+                  API Key
+                </label>
+                <Input.Password
+                  value={formAuthApiKey}
+                  onChange={(e) => setFormAuthApiKey(e.target.value)}
+                  placeholder={modalMode === 'edit' ? '已配置，留空不修改' : '请输入 API Key'}
+                />
+              </div>
+            </>
+          )}
+
+          {formAuthType === 'bearer_token' && (
+            <div>
+              <label className="block text-sm text-[#0F172A] mb-1.5">
+                Token
+              </label>
+              <Input.Password
+                value={formAuthToken}
+                onChange={(e) => setFormAuthToken(e.target.value)}
+                placeholder={modalMode === 'edit' ? '已配置，留空不修改' : '请输入 Token'}
+              />
+              <div className="text-[11px] text-[#94A3B8] mt-1">将作为 <code>Authorization: Bearer &lt;token&gt;</code> 发送，无需手动加 Bearer 前缀</div>
+            </div>
+          )}
+
+          {formAuthType === 'basic' && (
+            <>
+              <div>
+                <label className="block text-sm text-[#0F172A] mb-1.5">
+                  用户名
+                </label>
+                <Input
+                  value={formAuthUsername}
+                  onChange={(e) => setFormAuthUsername(e.target.value)}
+                  placeholder="请输入用户名"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-[#0F172A] mb-1.5">
+                  密码
+                </label>
+                <Input.Password
+                  value={formAuthPassword}
+                  onChange={(e) => setFormAuthPassword(e.target.value)}
+                  placeholder={modalMode === 'edit' ? '已配置，留空不修改' : '请输入密码'}
+                />
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block text-sm text-[#0F172A] mb-1.5">

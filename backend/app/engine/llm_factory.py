@@ -47,7 +47,7 @@ async def get_llm_client(
     Returns:
         A configured LangChain chat model instance.
     """
-    from agent_flow_harness.llm import build_client_from_doc, build_client_from_env
+    from agent_flow_harness import build_client_from_doc, build_client_from_env
 
     doc = agent_doc or {}
     # Backward compat: flat fields first, then legacy nested llm_config
@@ -118,7 +118,7 @@ def build_client_from_doc(
 
     Delegates to ``agent_flow_harness.llm.build_client_from_doc``.
     """
-    from agent_flow_harness.llm import build_client_from_doc as _harness_build
+    from agent_flow_harness import build_client_from_doc as _harness_build
 
     return _harness_build(doc, agent_config or {}, enable_thinking=enable_thinking)
 
@@ -128,6 +128,6 @@ def supports_thinking(model_id: str, compatibility: str) -> bool:
 
     Delegates to ``agent_flow_harness.llm.supports_thinking``.
     """
-    from agent_flow_harness.llm import supports_thinking as _harness_supports
+    from agent_flow_harness import supports_thinking as _harness_supports
 
     return _harness_supports(model_id, compatibility)

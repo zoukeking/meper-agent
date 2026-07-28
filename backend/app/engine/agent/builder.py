@@ -173,12 +173,12 @@ async def _build_workflow_tool_declaration(workflow_ids: list[str]) -> str:
         "",
         "When a workflow matches the user's request:",
         "",
-        "1. Call ``propose_workflow(workflow_name, params)`` — this shows a",
-        "   confirmation card to the user with workflow info and input params.",
-        "   After calling, just tell the user you found a suitable workflow.",
-        "   **Do NOT ask the user questions** — the card handles confirmation.",
+        "1. Call ``confirm_workflow(workflow_name, description, params)`` to",
+        "   show the user a confirmation card. Execution pauses until the user",
+        "   confirms or rejects. The tool returns the user's decision — do NOT",
+        "   add any follow-up text in the same turn, the card speaks for itself.",
         "",
-        "2. When the user confirms (e.g. says '确认', '好的'), call",
+        "2. When the user confirms (the tool returns a confirmation), call",
         "   ``dispatch_workflow(workflow_name, params)`` to create the Task.",
         "",
     ]
@@ -295,7 +295,7 @@ def _build_builtin_tool_declaration(builtin_config: list[str]) -> str:
         "",
         "When you need more information from the user, you MUST call the **ask_clarification** tool.",
         "Do NOT ask questions in plain text — the tool provides interactive UI (option buttons,",
-        "confirmation dialogs) that plain text cannot.",
+        "confirmation dialogs, structured forms) that plain text cannot.",
         "",
         "Choose the appropriate `clarification_type`:",
         "- `missing_info`: Missing required details (e.g. file format, target audience).",
@@ -310,6 +310,44 @@ def _build_builtin_tool_declaration(builtin_config: list[str]) -> str:
         "  Set `options` to alternative suggestions if applicable.",
         "",
         "**IMPORTANT**: `options` must be a JSON array of strings, e.g. `[\"React\", \"Vue\", \"Svelte\"]`.",
+        "",
+        "#### Wizard mode (multiple questions, asked one by one)",
+        "",
+        "When you need to collect **two or more independent pieces of information**,",
+        "use the `fields` parameter. The host asks each question one at a time (the user can",
+        "go back to edit earlier answers), so all fields are resolved in a single tool call",
+        "instead of repeated back-and-forth rounds.",
+        "",
+        "Do NOT use `fields` when:",
+        "- You only have one question (use the single-question form).",
+        "- It is a `risk_confirmation` or a single `approach_choice` (use `options`).",
+        "",
+        "Each field object has: `name` (key the answer returns under), `label` (question text",
+        "shown to the user), `field_type` (`text`/`number`/`boolean`/`select`), `required`,",
+        "`options`, `default`, and `description` (help text).",
+        "",
+        "**Deciding whether to provide `options`:**",
+        "- **Provide 3-5 recommended options** whenever reasonable (preferred). This gives the",
+        "  user quick choices while still allowing free input at the bottom of each question.",
+        "- **Omit `options`** only for fields the user MUST type themselves and cannot be",
+        "  anticipated (e.g. passwords, tokens, free-form names). In that case only an input",
+        "  box is shown.",
+        "Boolean fields never take `options` (they are a yes/no toggle).",
+        "",
+        "Example — collecting report parameters:",
+        "```json",
+        "[",
+        "  {\"name\": \"audience\", \"label\": \"目标受众是谁？\", \"field_type\": \"select\",",
+        "   \"options\": [\"技术人员\", \"管理层\", \"客户\", \"通用读者\"]},",
+        "  {\"name\": \"format\", \"label\": \"输出格式？\", \"field_type\": \"select\",",
+        "   \"options\": [\"Markdown\", \"PDF\", \"PPT\", \"HTML\"]},",
+        "  {\"name\": \"api_key\", \"label\": \"API Key\", \"field_type\": \"text\"},",
+        "  {\"name\": \"length\", \"label\": \"篇幅(字)?\", \"field_type\": \"number\", \"default\": 500}",
+        "]",
+        "```",
+        "",
+        "The user's answers come back as a JSON string like `{\"audience\":\"管理层\",\"format\":\"PDF\",\"api_key\":\"sk-...\",\"length\":800}`,",
+        "which you can parse and use directly.",
     ])
 
     return "\n".join(lines)
@@ -323,10 +361,9 @@ def _build_task_tool_declaration() -> str:
         "",
         "You have access to the following task management tools. Use them to query or manage workflow Tasks.",
         "",
-        "- **propose_workflow(workflow_name, params)**: Propose a workflow to the user. Returns structured info that shows a confirmation card. Does NOT create a Task — just tell the user you found a workflow after calling.",
+        "- **confirm_workflow(workflow_name, description, params)**: Ask the user to confirm executing a workflow. Execution pauses (a confirmation card is shown) and resumes when the user confirms or rejects. Pass the workflow's name and description (from the Workflow declaration above) plus the proposed input params.",
         "- **dispatch_workflow(workflow_name, params)**: Create and dispatch a workflow Task. Only call this AFTER the user explicitly confirms. Pass the user's original request as params using the exact variable names from the Workflow declaration above.",
-        "- **task_query(task_id)**: Query task status and result. Returns status + output (completed) or error (failed). Only call this when the user asks about progress — do NOT poll or loop.",
-        "- **task_list**: List Tasks with optional filters (status, workflow_id)",
+        "- **task_query(task_ids)**: Query status/results of Tasks by their IDs. Returns status + output (completed) or error (failed). Only call this when the user asks about progress — do NOT poll or loop.",
         "- **task_intervene**: Intervene in a Task (approve, reject, cancel, resume, retry)",
         "- **cancel_task**: Shortcut to cancel a Task",
         "- **update_task_variables**: Update the variable pool of a running Task",
@@ -363,14 +400,22 @@ async def _resolve_tools(agent: dict) -> list:
 
 
 async def _resolve_mcp_tools(agent: dict) -> list:
-    """Resolve MCP tools for Agent-bound MCP connections."""
+    """Resolve MCP tools for Agent-bound MCP connections.
+
+    Preview 是展示工具列表的辅助功能，单个 MCP 连接失败不应让整个 preview 崩溃，
+    这里降级为返回空列表（实际执行路径在 context.py 会收集 load_errors 暴露给前端）。
+    """
     from app.engine.tool.mcp_tool_cache import get_mcp_tools_cached
 
     mcp_connection_ids = agent.get("mcp_connection_ids") or []
     if not mcp_connection_ids:
         return []
 
-    return await get_mcp_tools_cached(mcp_connection_ids)
+    try:
+        return await get_mcp_tools_cached(mcp_connection_ids)
+    except Exception as exc:
+        logger.warning("preview_mcp_tools_resolve_failed", error=str(exc))
+        return []
 
 
 def _resolve_builtin_tools(agent: dict) -> list:
@@ -381,7 +426,7 @@ def _resolve_builtin_tools(agent: dict) -> list:
     (configurable=false, e.g. ask_clarification) are always included.
     Task/workflow tools (_TASK_TOOLS) are always-on app-level tools.
     """
-    from agent_flow_harness.tools.builtin import BUILTIN_TOOLS
+    from agent_flow_harness import BUILTIN_TOOLS
 
     from app.engine.agent.workflow_executor import _TASK_TOOLS
     from app.engine.harness_integration.context import (
@@ -391,7 +436,7 @@ def _resolve_builtin_tools(agent: dict) -> list:
 
     builtin_config = set(agent.get("builtin_config") or [])
     if "bash" in builtin_config:
-        builtin_config |= {"read", "write", "write_to_output"}
+        builtin_config |= {"read", "write"}
 
     tools: list = list(_TASK_TOOLS)  # app-level tools always on
     for name in _INJECTED_BUILTIN_TOOL_NAMES:
@@ -448,9 +493,9 @@ def _make_skill_loader(allowed_names: set[str] | None = None) -> Callable:
 # Preview / Dry-run — inspect assembled prompt & tools without invoking LLM
 # ---------------------------------------------------------------------------
 
-_WORKFLOW_TOOL_NAMES = {"propose_workflow", "dispatch_workflow"}
+_WORKFLOW_TOOL_NAMES = {"confirm_workflow", "dispatch_workflow"}
 _TASK_TOOL_NAMES = {
-    "task_query", "task_list", "task_intervene",
+    "task_query", "task_intervene",
     "cancel_task", "update_task_variables",
 }
 

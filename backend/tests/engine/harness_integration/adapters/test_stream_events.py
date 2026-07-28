@@ -12,12 +12,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from app.engine.harness_integration.adapters.stream_events import (
+    _build_interrupt_event,
     _extract_interrupt,
     _extract_text_content,
     _extract_thinking_content,
     _StreamingAccumulator,
     stream_events_to_app_events,
 )
+from langchain_core.messages import ToolMessage
 
 # ---------------------------------------------------------------------------
 # Helpers — simulate LangGraph event shapes
@@ -160,7 +162,57 @@ async def test_tool_result_from_tool_end():
     """on_tool_end → tool_result event."""
     events = [{"event": "on_tool_end", "name": "write", "data": {"output": _ToolMessage(content="done")}}]
     emitted = await _run(events)
-    assert {"type": "tool_result", "tool_name": "write", "content": "done"} in emitted
+    assert {"type": "tool_result", "tool_name": "write", "content": "done", "status": "success"} in emitted
+
+
+async def _collect_tool_end_events(tool_message: ToolMessage) -> list[Any]:
+    """Helper: 模拟一个 on_tool_end 事件，收集发出的 AppEvent。"""
+    events: list[Any] = []
+
+    async def on_event(evt: Any) -> None:
+        events.append(evt)
+
+    fake_event = {
+        "event": "on_tool_end",
+        "name": "mcp__github__create_issue",
+        "data": {"output": tool_message},
+    }
+
+    async def _aiter():
+        yield fake_event
+
+    await stream_events_to_app_events(_aiter(), on_event)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_tool_end_error_status_propagated():
+    """ToolMessage(status=error) 应产生 status=error 的 ToolResultEvent。"""
+    error_msg = ToolMessage(
+        content="Error executing tool: permission denied",
+        name="mcp__github__create_issue",
+        tool_call_id="call_1",
+        status="error",
+    )
+    events = await _collect_tool_end_events(error_msg)
+    tool_results = [e for e in events if getattr(e, "type", None) == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0].status == "error"
+    assert "permission denied" in tool_results[0].content
+
+
+@pytest.mark.asyncio
+async def test_tool_end_success_status_default():
+    """正常 ToolMessage 应产生 status=success 的 ToolResultEvent。"""
+    ok_msg = ToolMessage(
+        content="issue created #42",
+        name="mcp__github__create_issue",
+        tool_call_id="call_1",
+    )
+    events = await _collect_tool_end_events(ok_msg)
+    tool_results = [e for e in events if getattr(e, "type", None) == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0].status == "success"
 
 
 @pytest.mark.asyncio
@@ -236,6 +288,29 @@ async def test_interrupt_from_chain_end():
     interrupt_events = [e for e in emitted if e["type"] == "interrupt"]
     assert len(interrupt_events) == 1
     assert interrupt_events[0]["question"] == "which approach?"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_form_fields_propagated():
+    """表单模式：payload 中的 fields 透传到 InterruptEvent（两条事件路径）。"""
+    fields = [
+        {"name": "audience", "label": "受众", "field_type": "select", "allow_other": True},
+    ]
+    # on_tool_error 路径
+    payload = {"question": "请补充", "type": "missing_info", "fields": fields}
+    gi = _GraphInterruptError((_Interrupt(value=payload),))
+    emitted = await _run([{"event": "on_tool_error", "data": {"error": gi}}])
+    ev = next(e for e in emitted if e["type"] == "interrupt")
+    assert ev["fields"] == fields
+
+    # on_chain_end 路径
+    intr = _Interrupt(value=payload)
+    emitted = await _run([{
+        "event": "on_chain_end",
+        "data": {"output": {"__interrupt__": [intr]}},
+    }])
+    ev = next(e for e in emitted if e["type"] == "interrupt")
+    assert ev["fields"] == fields
 
 
 @pytest.mark.asyncio
@@ -360,8 +435,21 @@ class TestExtractInterrupt:
         result = _extract_interrupt(gi)
         assert result == payload
 
+    def test_graph_interrupt_workflow_confirmation(self):
+        """confirm_workflow payload (type=workflow_confirmation, no question)
+        is recognised — this is the regression that previously dropped
+        workflow confirmations because the check was `question in value`."""
+        payload = {
+            "type": "workflow_confirmation",
+            "workflow_name": "data-pull",
+            "workflow_description": "数据拉取",
+            "input_preview": {"source": "mysql"},
+        }
+        gi = _GraphInterruptError((_Interrupt(value=payload),))
+        assert _extract_interrupt(gi) == payload
+
     def test_graph_interrupt_without_question(self):
-        """Interrupt without question field → None (not an ask_clarification)."""
+        """Interrupt with neither question nor workflow_confirmation → None."""
         gi = _GraphInterruptError((_Interrupt(value={"error": "something"}),))
         assert _extract_interrupt(gi) is None
 
@@ -370,6 +458,40 @@ class TestExtractInterrupt:
 
     def test_none(self):
         assert _extract_interrupt(None) is None
+
+
+class TestBuildInterruptEvent:
+    """_build_interrupt_event dispatches on payload type to fill the right
+    InterruptEvent fields for the frontend card renderer."""
+
+    def test_workflow_confirmation_payload(self):
+        payload = {
+            "type": "workflow_confirmation",
+            "workflow_name": "data-pull",
+            "workflow_description": "数据拉取",
+            "input_preview": {"source": "mysql"},
+        }
+        evt = _build_interrupt_event(payload, interrupt_id="intr_1")
+        assert evt.kind == "workflow_confirmation"
+        assert evt.workflow_name == "data-pull"
+        assert evt.workflow_description == "数据拉取"
+        assert evt.input_preview == {"source": "mysql"}
+        assert evt.interrupt_id == "intr_1"
+        # clarification fields stay at defaults
+        assert evt.question == ""
+
+    def test_clarification_payload(self):
+        payload = {
+            "question": "which db?",
+            "type": "missing_info",
+            "options": ["mysql", "postgres"],
+        }
+        evt = _build_interrupt_event(payload)
+        assert evt.kind == "clarification"
+        assert evt.question == "which db?"
+        assert evt.options == ["mysql", "postgres"]
+        # workflow fields stay at defaults
+        assert evt.workflow_name == ""
 
 
 class TestExtractContent:

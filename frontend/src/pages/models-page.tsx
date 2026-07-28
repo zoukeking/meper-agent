@@ -153,12 +153,6 @@ export default function ModelsPage() {
       message.success('模型已删除')
       queryClient.invalidateQueries({ queryKey: modelKeys.lists() })
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message
-        : '删除失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: save model (create or update) ─── */
@@ -172,12 +166,6 @@ export default function ModelsPage() {
       message.success(isEditMode ? '模型更新成功' : '模型创建成功')
       closeModal()
       queryClient.invalidateQueries({ queryKey: modelKeys.lists() })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message
-        : isEditMode ? '更新失败' : '创建失败'
-      message.error(msg)
     },
   })
 
@@ -199,7 +187,6 @@ export default function ModelsPage() {
       const msg = err && typeof err === 'object' && 'message' in err
         ? (err as { message: string }).message
         : '测试请求失败'
-      message.error(msg)
       const errResult: ModelTestResult = {
         success: false,
         latency_ms: 0,

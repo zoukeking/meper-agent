@@ -84,21 +84,42 @@ class ToolResultEvent(_Base):
     type: Literal["tool_result"] = "tool_result"
     tool_name: str
     content: str
+    status: Literal["success", "error"] = "success"
 
 
 class InterruptEvent(_Base):
     """Agent paused via ``interrupt()`` and is awaiting a human response.
 
     Emitted when the graph encounters an ``interrupt()`` call (e.g.
-    ``ask_clarification``). The host should display the question to the user
-    and resume the graph with ``Command(resume=answer)``.
+    ``ask_clarification``, ``confirm_workflow``). The host should display
+    the appropriate card to the user and resume the graph with
+    ``Command(resume=answer)``.
+
+    ``kind`` selects the card: ``clarification`` (ask_clarification) renders
+    a question/options card using ``question``/``options``/``fields``;
+    ``workflow_confirmation`` (confirm_workflow) renders a workflow
+    confirmation card using ``workflow_name``/``workflow_description``/
+    ``input_preview``.
+
+    When ``kind == "clarification"`` and ``fields`` is non-empty, the host
+    should render a structured form (one input per field) instead of a
+    single question card; the user's answers are aggregated as a JSON
+    string and passed back via resume. Each field dict mirrors
+    ``ClarificationField.model_dump()``.
     """
 
     type: Literal["interrupt"] = "interrupt"
-    question: str
+    kind: Literal["clarification", "workflow_confirmation"] = "clarification"
+    # clarification fields (ask_clarification)
+    question: str = ""
     clarification_type: str = "missing_info"
     context: str | None = None
     options: list[str] | None = None
+    fields: list[dict[str, Any]] | None = None
+    # workflow_confirmation fields (confirm_workflow)
+    workflow_name: str = ""
+    workflow_description: str = ""
+    input_preview: dict[str, Any] | None = None
     interrupt_id: str = ""
 
 

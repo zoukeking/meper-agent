@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.7
+
+# Development image for frontend-client - runs Vite dev server with HMR
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# Copy source
+COPY . .
+
+# Expose Vite dev server port (frontend-client uses 3001)
+EXPOSE 3001
+
+# Run Vite dev server
+CMD ["npm", "run", "dev"]

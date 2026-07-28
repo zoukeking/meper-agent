@@ -5,7 +5,7 @@ These tests validate it via the harness public API to ensure the delegate
 in ``app.engine.llm_factory`` is wired correctly.
 """
 
-from agent_flow_harness.llm import build_thinking_kwargs, supports_thinking
+from agent_flow_harness import build_thinking_kwargs, supports_thinking
 
 
 class TestBuildThinkingKwargs:

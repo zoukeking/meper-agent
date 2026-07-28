@@ -38,11 +38,29 @@ const AUTH_LABELS: Record<McpAuthType, string> = {
   basic: 'Basic Auth',
 };
 
+/** Inline guidance shown above the structured auth fields. Tells the user what
+ * the selected auth_type does and which header it produces. */
+const AUTH_HINTS: Record<Exclude<McpAuthType, 'none'>, string> = {
+  api_key: '通过自定义请求头携带密钥（默认 X-API-Key）。用于上游服务以 API Key 鉴权的场景。',
+  bearer_token: '生成标准请求头 Authorization: Bearer <token>。用于上游服务以 OAuth/JWT 鉴权的场景。',
+  basic: '用户名密码做 Base64 编码，生成请求头 Authorization: Basic <base64>。用于 HTTP 基础认证。',
+};
+
 const PROTOCOL_OPTIONS = ['streamable-http', 'sse'];
 const AUTH_OPTIONS: McpAuthType[] = ['none', 'api_key', 'bearer_token', 'basic'];
 
 type ConnForm = Omit<McpConnectionCreateInput, 'auth_config' | 'default_params'> & {
-  auth_config: string; // JSON string, edited as text
+  // Structured auth fields — assembled into auth_config on submit. Keep them
+  // flat (instead of editing raw JSON) so users pick an auth_type and just fill
+  // labeled inputs. auth_config keys follow the backend contract:
+  //   api_key:       { api_key, header_name? }
+  //   bearer_token:  { token }
+  //   basic:         { username, password }
+  apiKey: string;
+  headerName: string;
+  token: string;
+  username: string;
+  password: string;
   default_params: string; // JSON string
 };
 
@@ -53,23 +71,63 @@ function emptyForm(): ConnForm {
     url: '',
     protocol: 'streamable-http',
     auth_type: 'none',
-    auth_config: '',
+    apiKey: '',
+    headerName: 'X-API-Key',
+    token: '',
+    username: '',
+    password: '',
     timeout: 30,
     default_params: '',
   };
 }
 
 function connToForm(c: McpConnection): ConnForm {
+  const cfg = c.auth_config ?? {};
   return {
     name: c.name,
     description: c.description ?? '',
     url: c.url,
     protocol: c.protocol ?? 'streamable-http',
     auth_type: c.auth_type ?? 'none',
-    auth_config: c.auth_config && Object.keys(c.auth_config).length ? JSON.stringify(c.auth_config, null, 2) : '',
+    // Read each auth_config value defensively: older records may use either
+    // shape, and masked responses ("***") are preserved for unchanged fields.
+    apiKey: String(cfg.api_key ?? ''),
+    headerName: String(cfg.header_name ?? 'X-API-Key'),
+    token: String(cfg.token ?? ''),
+    username: String(cfg.username ?? ''),
+    password: String(cfg.password ?? ''),
     timeout: c.timeout ?? 30,
     default_params: c.default_params && Object.keys(c.default_params).length ? JSON.stringify(c.default_params, null, 2) : '',
   };
+}
+
+/**
+ * Build the auth_config object for the current auth_type from the structured
+ * form fields. Mirrors the backend's `_build_headers` contract exactly:
+ *   api_key → { api_key, header_name? }  (header_name omitted if default)
+ *   bearer_token → { token }
+ *   basic → { username, password }
+ * Returns undefined for 'none' so the field is omitted from the payload.
+ */
+function buildAuthConfig(form: ConnForm): Record<string, string> | undefined {
+  switch (form.auth_type) {
+    case 'api_key': {
+      const cfg: Record<string, string> = { api_key: form.apiKey.trim() };
+      if (form.headerName.trim() && form.headerName.trim() !== 'X-API-Key') {
+        cfg.header_name = form.headerName.trim();
+      }
+      return Object.keys(cfg).length ? cfg : undefined;
+    }
+    case 'bearer_token':
+      return form.token.trim() ? { token: form.token.trim() } : undefined;
+    case 'basic': {
+      const u = form.username.trim();
+      const p = form.password;
+      return u ? { username: u, password: p } : undefined;
+    }
+    default:
+      return undefined;
+  }
 }
 
 /** Parse a JSON text field, returning {} on empty. Throws on invalid JSON. */
@@ -157,12 +215,11 @@ export function McpManagePage() {
     },
     onError: (e, conn) => {
       setTestingId(null);
-      toast.error(`「${conn.name}」测试请求失败：${e instanceof Error ? e.message : '网络错误'}`);
     },
   });
 
   const buildPayload = (): McpConnectionCreateInput => {
-    const auth_config = parseJsonOrEmpty(form.auth_config, 'auth_config');
+    const auth_config = buildAuthConfig(form);
     const default_params = parseJsonOrEmpty(form.default_params, 'default_params');
     return {
       name: form.name.trim(),
@@ -170,7 +227,7 @@ export function McpManagePage() {
       url: form.url.trim(),
       protocol: form.protocol,
       auth_type: form.auth_type,
-      ...(Object.keys(auth_config).length ? { auth_config: auth_config as Record<string, string> } : {}),
+      ...(auth_config ? { auth_config } : {}),
       ...(form.timeout ? { timeout: form.timeout } : {}),
       ...(Object.keys(default_params).length ? { default_params } : {}),
     };
@@ -357,9 +414,67 @@ export function McpManagePage() {
                 <Field label="超时 (秒)"><input type="number" min="1" max="300" value={form.timeout} onChange={(e) => setForm({ ...form, timeout: Number(e.target.value) })} className={inputCls} /></Field>
               </div>
               {form.auth_type !== 'none' && (
-                <Field label="认证配置 (JSON)">
-                  <textarea value={form.auth_config} onChange={(e) => setForm({ ...form, auth_config: e.target.value })} placeholder={'{\n  "key": "your-api-key"\n}'} rows={3} className={`${inputCls} font-mono resize-y`} />
-                </Field>
+                <div className="space-y-3 rounded-lg border border-[#27272a] bg-[#18181b]/40 p-3">
+                  <p className="text-[10px] text-[#71717a] leading-relaxed">
+                    {AUTH_HINTS[form.auth_type]}
+                  </p>
+                  {form.auth_type === 'api_key' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="API Key *" hint={editing && form.apiKey === '***' ? '已配置，保持 *** 不修改；重新输入以更新' : undefined}>
+                        <input
+                          required
+                          value={form.apiKey}
+                          onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
+                          placeholder="sk-..."
+                          className={inputCls}
+                          autoComplete="off"
+                        />
+                      </Field>
+                      <Field label="请求头名称">
+                        <input
+                          value={form.headerName}
+                          onChange={(e) => setForm({ ...form, headerName: e.target.value })}
+                          placeholder="X-API-Key"
+                          className={inputCls}
+                        />
+                      </Field>
+                    </div>
+                  )}
+                  {form.auth_type === 'bearer_token' && (
+                    <Field label="Token *" hint={editing && form.token === '***' ? '已配置，保持 *** 不修改；重新输入以更新' : undefined}>
+                      <input
+                        required
+                        value={form.token}
+                        onChange={(e) => setForm({ ...form, token: e.target.value })}
+                        placeholder="粘贴 Bearer Token（无需加 Bearer 前缀）"
+                        className={inputCls}
+                        autoComplete="off"
+                      />
+                    </Field>
+                  )}
+                  {form.auth_type === 'basic' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="用户名 *">
+                        <input
+                          required
+                          value={form.username}
+                          onChange={(e) => setForm({ ...form, username: e.target.value })}
+                          className={inputCls}
+                          autoComplete="off"
+                        />
+                      </Field>
+                      <Field label="密码" hint={editing && form.password === '***' ? '已配置，保持 *** 不修改；重新输入以更新' : undefined}>
+                        <input
+                          type="password"
+                          value={form.password}
+                          onChange={(e) => setForm({ ...form, password: e.target.value })}
+                          className={inputCls}
+                          autoComplete="new-password"
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
               )}
               <Field label="默认参数 (JSON，可选)">
                 <textarea value={form.default_params} onChange={(e) => setForm({ ...form, default_params: e.target.value })} placeholder="{}" rows={2} className={`${inputCls} font-mono resize-y`} />
@@ -437,11 +552,12 @@ function ViewToolsModal({ conn, onClose }: { conn: McpConnection; onClose: () =>
 
 const inputCls = 'w-full px-3 py-2 bg-[#121214] border border-[#27272a] rounded-lg text-white placeholder:text-[#52525b] focus:outline-none focus:border-indigo-500 transition text-xs font-sans';
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="space-y-1">
       <label className="text-slate-400 font-medium font-sans">{label}</label>
       {children}
+      {hint && <p className="text-[10px] text-[#71717a] leading-relaxed">{hint}</p>}
     </div>
   );
 }

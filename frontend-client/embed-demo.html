@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>chat-widget.js 嵌入演示（data-api-key + cookie token 运行时传入）</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 24px 28px 120px;
+      background: #f0f2f5;
+      color: #333;
+      line-height: 1.7;
+    }
+    h2 { margin: 0 0 10px; font-size: 18px; }
+    .bar {
+      background: #fff;
+      padding: 16px 20px;
+      border-radius: 10px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+      font-size: 13px;
+      max-width: 760px;
+    }
+    .bar b { color: #4f46e5; }
+    .bar code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 12px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      overflow-x: auto;
+      margin: 10px 0;
+    }
+    .filler { color: #9ca3af; font-size: 13px; max-width: 760px; }
+    button.afc-demo-btn {
+      margin-top: 8px;
+      padding: 6px 14px;
+      border: 1px solid #c7d2fe;
+      background: #eef2ff;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button.afc-demo-btn.secondary { border-color: #e5e7eb; background: #fff; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <h2>宿主页（模拟第三方网站）— chat-widget.js + data-api-key + cookie token</h2>
+  <div class="bar">
+    第三方接入只需一行 <code>&lt;script&gt;</code>：<b>API Key 写在 <code>data-api-key</code></b>，
+    chat-widget.js 在 iframe 内 client 启动时经 postMessage 把 key 注入（client 自身不内置 key）。
+    <b>终端用户 token</b> 从宿主页 cookie 读取（<code>data-token-cookie</code>，默认 <code>mep-access-token</code>），
+    作为 <b>X-User-Token</b> 注入 client —— 对应后端 Key 配了 <code>user_info_url</code> 的 callback 验证模式。
+    <pre>&lt;script src="http://localhost:3001/chat-widget.js"
+        data-chat-url="http://localhost:3001"
+        data-api-key="af_live_xxx"
+        data-token-cookie="mep-access-token"
+        data-title="Agent Flow 助手"
+        data-width="680px"&gt;&lt;/script&gt;</pre>
+    可选：<code>data-user-token</code>（显式 token，优先级高于 cookie）、<code>data-width/right/bottom/open-on-load</code>。
+    JS API：<code>AgentFlowChat.open() / .close() / .toggle()</code>。
+  </div>
+  <div class="bar">
+    <b>本地测试 cookie 注入：</b>真实接入时 <code>mep-access-token</code> 由客户系统登录写入；本地无登录态，点下方按钮模拟。
+    写入后打开侧滑抽屉，握手会把该值作为 X-User-Token 透传给 client（可在 Network 面板核对请求头）。
+    <br />
+    <button id="setToken" class="afc-demo-btn">写入测试 token 到 mep-access-token</button>
+    <button id="clearToken" class="afc-demo-btn secondary">清除</button>
+    <span id="tokenState" style="margin-left:10px;color:#6b7280;font-size:12px;"></span>
+  </div>
+  <p class="filler">↓ 宿主页正文占位。右下角浮动 logo 按钮，点击侧滑出 client（key + cookie token 由本页注入）。</p>
+  <p class="filler">……（正文占位）……</p>
+
+  <script>
+    // 模拟客户系统登录态：把测试 token 写入 cookie，供 chat-widget.js 读取
+    (function () {
+      var NAME = 'mep-access-token';
+      function show() {
+        var m = document.cookie.match(new RegExp('(^|; )' + NAME + '=([^;]*)'));
+        document.getElementById('tokenState').textContent = m
+          ? '当前 token: ' + decodeURIComponent(m[2])
+          : '（未写入）';
+      }
+      document.getElementById('setToken').onclick = function () {
+        document.cookie = NAME + '=test-user-token-' + Date.now() + ';path=/;max-age=3600';
+        show();
+      };
+      document.getElementById('clearToken').onclick = function () {
+        document.cookie = NAME + '=;path=/;max-age=0';
+        show();
+      };
+      show();
+    })();
+  </script>
+
+  <!-- 第三方接入的全部：一行 script + data-api-key + data-token-cookie，脚本自动初始化并注入 key/token -->
+  <script src="/chat-widget.js"
+          data-chat-url="http://localhost:3001"
+          data-api-key="af_live_mitFAgJc9d3B-kfnKswWrppGITjYDr4f"
+          data-token-cookie="mep-access-token"
+          data-title="Agent Flow 助手"
+          data-width="680px"></script>
+</body>
+</html>

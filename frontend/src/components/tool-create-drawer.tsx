@@ -13,7 +13,6 @@ import { Drawer, Button, Input, Select, Radio, Segmented, message, Divider, Chec
 import { GlobalOutlined, CodeOutlined, PlusOutlined } from '@ant-design/icons'
 import { toolsApi, toolKeys } from '../services/tools-api'
 import { agentKeys } from '../services/agent-api'
-import { normalizeError } from '../services/api-client'
 import ParamEditor from './param-editor'
 import type { ToolParam } from './param-editor'
 import { paramsToSchema } from './param-utils'
@@ -66,7 +65,6 @@ export default function ToolCreateDrawer({ open, onClose }: ToolCreateDrawerProp
       resetForm()
       onClose()
     },
-    onError: (err) => message.error(normalizeError(err as never).message),
   })
 
   const resetForm = () => {

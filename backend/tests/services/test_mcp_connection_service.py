@@ -295,3 +295,110 @@ async def test_discover_tools_not_found(mock_database):
 
     with pytest.raises(NotFoundError):
         await McpConnectionService.discover_tools("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# auth_config field-level merge (protects secrets from masked round-trips)
+# ---------------------------------------------------------------------------
+
+from app.services.mcp_connection_service import (  # noqa: E402
+    _MASKED_VALUE,
+    _merge_auth_config,
+)
+
+
+def test_merge_auth_config_skips_masked_value():
+    """A masked '***' value (redacted in API responses) must not overwrite the
+    real secret when round-tripped through an edit form."""
+    existing = {"token": "real-secret", "username": "admin"}
+    incoming = {"token": _MASKED_VALUE}  # user didn't change the token field
+
+    merged = _merge_auth_config(existing, incoming)
+    assert merged["token"] == "real-secret"
+    assert merged["username"] == "admin"
+
+
+def test_merge_auth_config_applies_real_change():
+    """A genuinely new value overwrites the old one; untouched keys persist."""
+    existing = {"token": "old", "username": "admin"}
+    incoming = {"token": "new-token"}
+
+    merged = _merge_auth_config(existing, incoming)
+    assert merged["token"] == "new-token"
+    assert merged["username"] == "admin"
+
+
+def test_merge_auth_config_skips_empty_string():
+    """Empty strings (e.g. blank input fields) are treated as 'unchanged'."""
+    existing = {"token": "real-secret"}
+    incoming = {"token": ""}
+
+    merged = _merge_auth_config(existing, incoming)
+    assert merged["token"] == "real-secret"
+
+
+def test_merge_auth_config_none_incoming_keeps_all():
+    """When the update omits auth_config entirely, everything is preserved."""
+    existing = {"token": "real-secret", "username": "admin"}
+
+    merged = _merge_auth_config(existing, None)
+    assert merged == {"token": "real-secret", "username": "admin"}
+
+
+@pytest.mark.asyncio
+async def test_update_connection_preserves_secret_through_masked_round_trip(mock_database):
+    """End-to-end regression: editing a connection without changing its secret
+    must NOT overwrite the stored secret with the masked '***' placeholder.
+
+    The masked value comes from the list/detail API response; if an edit form
+    submits it back verbatim, the real secret would be destroyed. The update
+    path must decrypt → merge (skipping ***) → re-encrypt so the secret survives.
+    """
+    # existing auth_config is stored ENCRYPTED (ciphertext). _decrypt_auth_config
+    # reverses it; we mock the crypto to make the test deterministic.
+    existing = {
+        "_id": "mcp_123",
+        "name": "test",
+        "url": "http://test.com",
+        "protocol": "streamable-http",
+        "auth_type": "bearer_token",
+        "auth_config": {"token": "ENC(real-secret)"},  # ciphertext in DB
+        "timeout": 30,
+        "description": "",
+    }
+    # After update, get_connection returns the merged doc.
+    updated = {**existing, "auth_config": {"token": "ENC(real-secret)"}}
+
+    mock_col = MagicMock()
+    mock_col.find_one = AsyncMock(side_effect=[existing, updated])
+    mock_col.update_one = AsyncMock()
+    mock_database.__getitem__.return_value = mock_col
+
+    crypto_path = "app.services.mcp_connection_service"
+    with (
+        patch(f"{crypto_path}._invalidate_mcp_cache"),
+        patch(
+            f"{crypto_path}._decrypt_auth_config",
+            side_effect=lambda c: {"token": "real-secret"} if c else c,
+        ) as mock_decrypt,
+        patch(
+            f"{crypto_path}._encrypt_auth_config",
+            side_effect=lambda c: {k: f"ENC({v})" for k, v in c.items()},
+        ) as mock_encrypt,
+    ):
+        # Frontend submits the masked value back (user didn't edit the token).
+        result = await McpConnectionService.update_connection("mcp_123", {
+            "auth_config": {"token": "***"},
+        })
+
+    # 1. Decrypt ran at least once on the stored ciphertext (update merge, plus
+    #    get_connection may call it again) → confirms existing secret was read.
+    assert mock_decrypt.called
+    # 2. Encrypt received the REAL secret (not "***"), proving the merge kept it.
+    encrypted_arg = mock_encrypt.call_args.args[0]
+    assert encrypted_arg == {"token": "real-secret"}, (
+        f"merge should preserve real secret, got {encrypted_arg}"
+    )
+    # 3. get_connection decrypts on read → the returned token is the real
+    #    secret, NOT the "***" placeholder that was submitted.
+    assert result["auth_config"]["token"] == "real-secret"

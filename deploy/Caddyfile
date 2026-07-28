@@ -1,11 +1,10 @@
 # Caddy configuration for Agent Flow
-# Serves frontend static files, widget JS, and reverse proxies API
+# Serves frontend-studio (management at /) + frontend-client (end-user at /client/) + reverse proxies API
 
 :80 {
-	# Frontend static files root
 	root * /srv
 
-	# Backend API proxy (must be before try_files)
+	# Backend API proxy
 	@api path /api/*
 	handle @api {
 		reverse_proxy backend:8000
@@ -17,23 +16,26 @@
 		reverse_proxy backend:8000
 	}
 
-	# Widget JS — serve directly, no SPA fallback
-	@widget path /static/*
-	handle @widget {
+	# frontend-client (end-user app at /client/)
+	# 构建产物在 /srv/client/，vite base=/client/ 所以资源引用也是 /client/xxx。
+	# 不 strip_prefix：让 /client/* 原样匹配 /srv/client/* 文件路径。
+	# SPA fallback：找不到的文件回退到 /client/index.html。
+	@client path /client/*
+	handle @client {
+		root * /srv
+		try_files {path} /client/index.html
 		file_server
 	}
 
-	# Static files (try file first, then fall back to index.html for SPA)
+	# frontend-studio (management at /) — SPA fallback to /index.html
 	handle {
 		try_files {path} /index.html
 		file_server
 	}
 
-	# Logging
 	log {
 		output stdout
 	}
 
-	# Gzip compression
 	encode gzip
 }

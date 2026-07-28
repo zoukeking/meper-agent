@@ -97,6 +97,22 @@ class Settings(BaseSettings):
     # Workspace quota — max bytes per workspace (default 500 MB).
     WORKSPACE_MAX_BYTES: int = 500 * 1024 * 1024
 
+    # Knowledge Base filesystem — root directory where KB .md files live.
+    # Each KB lives under ``{KB_CONTAINER_DIR}/{kb_id}/`` (tree-style: agents
+    # explore it at runtime via kb_glob/kb_grep/kb_read, no index, no vector).
+    # None = derive from KB_HOST_DIR (local dev).
+    # Docker: set explicitly by docker-compose (e.g. /data/knowledge_bases).
+    KB_CONTAINER_DIR: str | None = None
+    # Host-side path for Knowledge Bases (the one users configure in .env).
+    KB_HOST_DIR: str = "~/.agent-flow/knowledge_bases"
+
+    # Knowledge Base tool limits (truncation / caps, aligned with langxin tree KB).
+    KB_GLOB_MAX_RESULTS: int = 200
+    KB_GREP_MAX_FILES: int = 50
+    KB_GREP_MAX_MATCHES: int = 200
+    KB_READ_MAX_BYTES: int = 16_384
+    KB_MAX_FILE_SIZE: int = 2 * 1024 * 1024  # 2 MB per uploaded .md
+
     @model_validator(mode="after")
     def _default_internal_dirs_from_host(self) -> "Settings":
         """Default container-internal dirs to host dirs when not explicitly set.
@@ -108,10 +124,13 @@ class Settings(BaseSettings):
         # Expand ~ in host dirs so Docker can use them directly
         self.WORKSPACES_HOST_DIR = os.path.expanduser(self.WORKSPACES_HOST_DIR)
         self.SKILLS_HOST_DIR = os.path.expanduser(self.SKILLS_HOST_DIR)
+        self.KB_HOST_DIR = os.path.expanduser(self.KB_HOST_DIR)
         if self.WORKSPACES_CONTAINER_DIR is None:
             self.WORKSPACES_CONTAINER_DIR = self.WORKSPACES_HOST_DIR
         if self.SKILLS_CONTAINER_DIR is None:
             self.SKILLS_CONTAINER_DIR = self.SKILLS_HOST_DIR
+        if self.KB_CONTAINER_DIR is None:
+            self.KB_CONTAINER_DIR = self.KB_HOST_DIR
         return self
 
     # ── Sandbox ──────────────────────────────────────────────────────────
@@ -146,6 +165,33 @@ class Settings(BaseSettings):
     # and skill directories are mounted.
     SANDBOX_CONTAINER_WORKSPACE_DIR: str = "/workspace"
     SANDBOX_CONTAINER_SKILLS_DIR: str = "/data/skills"
+
+    # ── Channels (inbound IM integrations) ──
+    CHANNEL_INBOUND_ACK_TIMEOUT_MS: int = 2000
+    CHANNEL_EVENT_LOG_TTL_HOURS: int = 24
+    CHANNEL_MAX_RETRIES: int = 3
+    CHANNEL_SEND_MAX_RETRIES: int = 3
+    CHANNEL_DEFAULT_REPLY_ON_FAILURE: str = "处理失败,请稍后重试或联系管理员"
+    CHANNEL_DEGRADED_ON_CONSECUTIVE_FAILURES: int = 5
+
+    # ── Channels / long-connection (no-public-URL receive mode) ──
+    # Per-provider master switches. Set to False to disable long-connection
+    # entirely for a provider (channels fall back to webhook mode).
+    CHANNEL_LARK_LONG_CONNECTION_ENABLED: bool = True
+    CHANNEL_DINGTALK_LONG_CONNECTION_ENABLED: bool = True
+    CHANNEL_WECOM_LONG_CONNECTION_ENABLED: bool = False  # no SDK yet
+    CHANNEL_CONNECTION_RECONNECT_INTERVAL: int = 10  # seconds between retries
+    CHANNEL_CONNECTION_STARTUP_DELAY: float = 2.0  # startup grace before first connect
+    # Long-connection mode executes inbound messages directly in the FastAPI
+    # process (no Celery). These tune that in-process execution:
+    #   - EXECUTION_MAX_RETRIES: retry count for TransientChannelError
+    #     (LLM rate limit / tool blip) with exponential backoff.
+    #   - MAX_CONCURRENT_EXECUTIONS_PER_CHANNEL: per-channel semaphore cap to
+    #     prevent a single busy chat from exhausting the LLM quota. Excess
+    #     messages queue inside dispatch_inbound until a slot frees up.
+    CHANNEL_EXECUTION_MAX_RETRIES: int = 3
+    CHANNEL_MAX_CONCURRENT_EXECUTIONS_PER_CHANNEL: int = 4
+
 
 
 settings = Settings()

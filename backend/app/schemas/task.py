@@ -22,7 +22,10 @@ class TaskCreate(BaseModel):
 class TaskIntervene(BaseModel):
     """Request body for Task intervention."""
 
-    action: str = Field(..., pattern=r"^(approve|reject|skip|retry|pause|resume|cancel|update_variables)$")
+    action: str = Field(
+        ...,
+        pattern=r"^(approve|reject|skip|retry|pause|resume|cancel|update_variables|rewind)$",
+    )
     # Deprecated: use comment; reason kept for backward compat
     reason: str | None = None
     # comment 支持三种形态（向后兼容）：
@@ -32,6 +35,10 @@ class TaskIntervene(BaseModel):
     #   下游可用 {{node.comment.field}} 钻取
     comment: str | dict[str, Any] | None = None
     version: int = Field(..., ge=1)
+    # rewind 专用：回退到的目标节点（必须是已执行过的节点）
+    target_node_id: str | None = None
+    # rewind 可选：覆盖变量池的输入值（merge 语义）
+    variables: dict[str, Any] | None = None
 
 
 class TaskUpdateVariables(BaseModel):

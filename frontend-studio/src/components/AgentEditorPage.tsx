@@ -11,7 +11,7 @@
 import { useState, useEffect, useMemo, type FC, type ReactNode } from 'react';
 import {
   ArrowLeft, Bot, Save, Loader2, Rocket, Archive, RefreshCw, Cpu, Wrench,
-  ChevronDown, ChevronRight, AlertTriangle,
+  ChevronDown, ChevronRight, AlertTriangle, Sparkles, Plus, Trash2,
 } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { agentApi, agentKeys, type AgentUpdateInput } from '../services/agent-api';
@@ -19,6 +19,7 @@ import { modelApi, modelKeys } from '../services/model-api';
 import { toolsApi, toolKeys, type BuiltinTool } from '../services/tools-api';
 import { mcpApi, mcpKeys } from '../services/mcp-api';
 import { workflowsApi, workflowKeys } from '../services/workflows-api';
+import { knowledgeApi, knowledgeKeys } from '../services/knowledge-api';
 import { toStudioAgent, fromStudioAgent } from '../services/adapters';
 import { Select, type SelectOptionGroup } from './ui';
 import { toast } from './ui/toast';
@@ -94,6 +95,11 @@ export function AgentEditorPage({
     queryFn: () => workflowsApi.list({ page: 1, page_size: 100 }),
   });
   const workflows = workflowsData?.items ?? [];
+  const { data: kbData } = useQuery({
+    queryKey: knowledgeKeys.list({ page: 1, page_size: 100 }),
+    queryFn: () => knowledgeApi.list({ page: 1, page_size: 100 }),
+  });
+  const knowledgeBases = kbData?.items ?? [];
 
   const updateM = useMutation({
     mutationFn: (input: AgentUpdateInput) => agentApi.update(agentId, input),
@@ -227,6 +233,42 @@ export function AgentEditorPage({
         </div>
       </Section>
 
+      {/* ── Section: 欢迎与引导（终端用户首屏） ── */}
+      <Section title="欢迎与引导" icon={<Sparkles className="w-3.5 h-3.5" />} defaultOpen={false}>
+        <Field label="欢迎词（Markdown，展示在终端用户首屏）">
+          <textarea rows={3} className={`${inputCls} text-xs`} placeholder="如：你好！我是销售助理，可以问我业绩、客户、订单等相关问题。" value={form.welcomeMessage ?? ''} onChange={(e) => set({ welcomeMessage: e.target.value })} />
+          <div className="text-[11px] text-slate-500 mt-1">留空则使用默认欢迎语。支持 Markdown 语法（加粗、列表等）。</div>
+        </Field>
+        <Field label="推荐问题 / 操作（终端用户可一键点击发送）">
+          <div className="space-y-2">
+            {(form.recommendedItems ?? []).map((item, idx) => (
+              <div key={idx} className="rounded-lg border border-[#27272a] bg-[#121214] p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-[#71717a] font-mono">推荐项 #{idx + 1}</span>
+                  <button type="button" onClick={() => set({ recommendedItems: (form.recommendedItems ?? []).filter((_, i) => i !== idx) })} className="flex items-center gap-1 text-[#ef4444] text-[10px] hover:underline cursor-pointer">
+                    <Trash2 className="w-3 h-3" /> 删除
+                  </button>
+                </div>
+                <input className={inputCls} placeholder="显示文案（必填），如：导出本月报表" value={item.label} onChange={(e) => set({ recommendedItems: (form.recommendedItems ?? []).map((it, i) => i === idx ? { ...it, label: e.target.value } : it) })} />
+                <input className={inputCls} placeholder="实际发送内容（留空则同显示文案）" value={item.prompt} onChange={(e) => set({ recommendedItems: (form.recommendedItems ?? []).map((it, i) => i === idx ? { ...it, prompt: e.target.value } : it) })} />
+              </div>
+            ))}
+            {(form.recommendedItems ?? []).length === 0 && (
+              <div className="text-xs text-[#71717a] text-center py-3">暂无推荐项，点击下方按钮添加</div>
+            )}
+            <button
+              type="button"
+              onClick={() => set({ recommendedItems: [...(form.recommendedItems ?? []), { label: '', prompt: '' }] })}
+              disabled={(form.recommendedItems ?? []).length >= 10}
+              className="flex items-center gap-1.5 px-3 py-1.5 border border-[#27272a] hover:bg-[#27272a] text-[#a1a1aa] hover:text-white rounded-lg text-xs font-semibold transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus className="w-3.5 h-3.5" /> 添加推荐项
+            </button>
+            <div className="text-[11px] text-slate-500">最多 10 条。「实际发送内容」留空时，点击按钮直接发送「显示文案」。</div>
+          </div>
+        </Field>
+      </Section>
+
       {/* ── Section: 执行参数 ── */}
       <Section title="执行参数" icon={<RefreshCw className="w-3.5 h-3.5" />} defaultOpen>
         <Field label="推理模型">
@@ -269,6 +311,11 @@ export function AgentEditorPage({
         <ToolGroup title="工作流 (Workflows)" hint={workflows.length === 0 ? '无工作流' : undefined}>
           {workflows.map((w) => (
             <ToolChip key={w.id} label={w.name} checked={form.skills.includes(`workflow:${w.id}`)} onToggle={() => set({ skills: toggleSkill(form.skills, `workflow:${w.id}`) })} />
+          ))}
+        </ToolGroup>
+        <ToolGroup title="知识库 (Knowledge Base)" hint={knowledgeBases.length === 0 ? '无知识库' : undefined}>
+          {knowledgeBases.map((kb) => (
+            <ToolChip key={`kb:${kb.id}`} label={kb.name} checked={form.skills.includes(`kb:${kb.id}`)} onToggle={() => set({ skills: toggleSkill(form.skills, `kb:${kb.id}`) })} />
           ))}
         </ToolGroup>
       </Section>

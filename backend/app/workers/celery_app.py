@@ -18,6 +18,7 @@ celery_app = Celery(
         "app.workers.tasks.webhook_delivery",
         "app.workers.tasks.scheduled_workflow",
         "app.workers.tasks.workflow_execution",
+        "app.workers.tasks.channel_inbound",
     ],
 )
 
@@ -69,20 +70,10 @@ def _init_worker(**_kwargs: object) -> None:
     from app.core.logging import setup_logging
     setup_logging()
 
-    # 2. Checkpointer 配置
-    try:
-        from agent_flow_harness import build_mongo_saver, configure_checkpointer
+    # 2. Checkpointer 配置 — shared with FastAPI lifespan via app.core.checkpointer
+    from app.core.checkpointer import configure_mongo_checkpointer
 
-        from app.db.mongodb import get_mongodb_client
-
-        saver = build_mongo_saver(
-            client=get_mongodb_client().delegate,
-            db_name=settings.MONGODB_DB_NAME,
-        )
-        configure_checkpointer(saver, overwrite=True)
-        logger.debug("celery_checkpointer_configured", db=settings.MONGODB_DB_NAME)
-    except Exception as exc:
-        logger.error("celery_checkpointer_config_failed", error=str(exc))
+    configure_mongo_checkpointer(log_on_error=True)
 
 
 @task_prerun.connect

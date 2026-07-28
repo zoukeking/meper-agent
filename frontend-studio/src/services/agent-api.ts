@@ -18,6 +18,8 @@ export interface Agent {
   id: string
   name: string
   description: string
+  welcome_message: string
+  recommended_items: { label: string; prompt: string }[]
   prompt_slots: Record<string, string>
   /** Skill tool IDs (source=markdown) */
   skill_ids: string[]
@@ -46,6 +48,10 @@ export interface AgentCreateInput {
 export interface AgentUpdateInput {
   name: string
   description?: string
+  /** 终端用户首屏欢迎词（Markdown） */
+  welcome_message?: string
+  /** 终端用户首屏推荐问题/操作 */
+  recommended_items?: { label: string; prompt: string }[]
   /** 提示词卡槽内容 */
   prompt_slots?: Record<string, string>
   /** Skill tool IDs (source=markdown) */
@@ -164,6 +170,7 @@ export interface ToolResultEvent {
   type: 'tool_result'
   tool_name: string
   content: string
+  status?: 'success' | 'error'
 }
 
 /** Incremental text delta streamed from the LLM */
@@ -182,15 +189,26 @@ export interface TextEvent {
 export interface ErrorEvent {
   type: 'error'
   content: string
+  source?: 'llm' | 'tool' | 'graph'
 }
 
-/** Agent paused via interrupt, awaiting user answer */
+/** Agent paused via interrupt, awaiting user answer.
+ *  kind discriminates clarification (ask_clarification) vs workflow
+ *  confirmation (confirm_workflow); the studio interrupt handler keys off
+ *  the tool_call's toolName rather than kind, but the fields are kept for
+ *  parity with the backend InterruptEvent. */
 export interface InterruptEvent {
   type: 'interrupt'
+  kind?: 'clarification' | 'workflow_confirmation'
+  // clarification fields (ask_clarification)
   question: string
   clarification_type: string
   context?: string | null
   options?: string[] | null
+  // workflow_confirmation fields (confirm_workflow)
+  workflow_name?: string
+  workflow_description?: string
+  input_preview?: Record<string, unknown>
   interrupt_id: string
 }
 
@@ -354,13 +372,27 @@ export const agentApi = {
   },
 
   /**
+   * Resume an interrupted agent execution (after ask_clarification) via SSE.
+   * Same streaming contract as stream(): returns the raw Response so the caller
+   * consumes SSE. The user's answer is fed back so the agent continues instead
+   * of re-asking the same question. POST /api/v1/agents/{id}/resume
+   */
+  async resume(
+    agentId: string,
+    body: { session_id: string; answer: string; enable_thinking?: boolean },
+  ): Promise<Response> {
+    const url = `${ENV.API_BASE_URL}/api/v1/agents/${encodeURIComponent(agentId)}/resume`
+    return this._streamWithRetry(url, body)
+  },
+
+  /**
    * Internal: POST to SSE stream URL with fetch().  If the response is 401
    * TOKEN_EXPIRED, attempt a silent refresh once and retry.
    *
    * NOTE: standard Axios interceptors do NOT apply to fetch(), so this
    * method duplicates the minimal refresh logic seen in api-client.ts.
    */
-  async _streamWithRetry(url: string, body: ExecutionRequest, _retried = false): Promise<Response> {
+  async _streamWithRetry(url: string, body: Record<string, unknown>, _retried = false): Promise<Response> {
     const accessToken = useAuthStore.getState().accessToken
 
     const res = await fetch(url, {

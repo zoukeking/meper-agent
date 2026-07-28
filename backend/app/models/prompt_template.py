@@ -12,7 +12,7 @@ truth) so both harness and the application share one definition.
 from __future__ import annotations
 
 # ── Fixed slot schema (re-exported from harness) ─────────────────────
-from agent_flow_harness.slots.schema import (  # noqa: F401
+from agent_flow_harness import (  # noqa: F401
     SLOT_NAMES,
     SLOT_SCHEMA,
     TOOL_DECLARATION_SLOT,

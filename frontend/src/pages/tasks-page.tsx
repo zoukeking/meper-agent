@@ -10,7 +10,7 @@
  */
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient, useQueries } from '@tanstack/react-query'
-import { Button, Tag, message, Spin, Modal, Drawer, Input, Empty, Alert, Segmented, DatePicker, Switch, Radio, Divider } from 'antd'
+import { Button, Tag, message, Spin, Modal, Drawer, Input, Empty, Alert, Segmented, DatePicker, Switch, Radio, Divider, Select, Tooltip } from 'antd'
 import {
   StopOutlined,
   RedoOutlined,
@@ -24,6 +24,7 @@ import {
   EditOutlined,
   ClockCircleOutlined,
   CaretRightOutlined,
+  RollbackOutlined,
 } from '@ant-design/icons'
 import { useTheme } from '../contexts/ThemeContext'
 import {
@@ -101,6 +102,13 @@ export default function TasksPage() {
   // comment 输入模式：text 纯文本 / json 结构化（与看板卡片弹窗保持一致）
   const [approvalCommentMode, setApprovalCommentMode] = useState<'text' | 'json'>('text')
   const [approvalTask, setApprovalTask] = useState<TaskSummary | TaskDetail | null>(null)
+
+  /* ─── Rewind state（退回重跑 Modal）─── */
+  const [rewindModalOpen, setRewindModalOpen] = useState(false)
+  const [rewindTargetNode, setRewindTargetNode] = useState<string>('')
+  // 变量编辑模式：'none' = 不改变量(纯退回), 'json' = JSON 编辑
+  const [rewindVarsMode, setRewindVarsMode] = useState<'none' | 'json'>('none')
+  const [rewindVarsText, setRewindVarsText] = useState<string>('')
 
   /* ─── Edit scheduled task modal state ─── */
   const [editTask, setEditTask] = useState<TaskSummary | null>(null)
@@ -233,28 +241,19 @@ export default function TasksPage() {
       setSelectedWorkflowId('')
       setCreateInput('')
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '创建失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: intervene (cancel / retry / approve / reject) ─── */
   const interveneMutation = useMutation({
-    mutationFn: ({ taskId, action, version, comment }: { taskId: string; action: string; version: number; comment?: CommentValue }) =>
-      tasksApi.intervene(taskId, { action, version, comment }),
-    onSuccess: () => {
-      message.success('操作成功')
+    mutationFn: ({ taskId, action, version, comment, target_node_id, variables }: { taskId: string; action: string; version: number; comment?: CommentValue; target_node_id?: string; variables?: Record<string, unknown> }) =>
+      tasksApi.intervene(taskId, { action, version, comment, target_node_id, variables }),
+    onSuccess: (data) => {
+      // 优先用后端返回的具体消息（如 rewind 的「已退回重跑」），无则兜底通用提示
+      message.success(data?.message || '操作成功')
       queryClient.invalidateQueries({ queryKey: taskKeys.lists() })
       if (detailTaskId) {
         queryClient.invalidateQueries({ queryKey: taskKeys.detail(detailTaskId) })
       }
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '操作失败'
-      message.error(msg)
     },
   })
 
@@ -267,11 +266,6 @@ export default function TasksPage() {
       if (detailTaskId) {
         queryClient.invalidateQueries({ queryKey: taskKeys.detail(detailTaskId) })
       }
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 
@@ -288,6 +282,23 @@ export default function TasksPage() {
     queryFn: () => workflowsApi.get(editTask!.workflow_id),
     enabled: !!editTask?.workflow_id,
   })
+
+  // rewind Modal 打开时拉工作流模板，用于把 completed_nodes 的 node_id 映射成节点名
+  const rewindWorkflowQuery = useQuery({
+    queryKey: ['workflow-detail-for-rewind', rewindModalOpen && taskDetail ? taskDetail.workflow_id : ''],
+    queryFn: () => workflowsApi.get(taskDetail!.workflow_id),
+    enabled: rewindModalOpen && !!taskDetail?.workflow_id,
+    staleTime: 60_000,
+  })
+  // node_id → { label, type } 映射，供 Select 显示节点名
+  const rewindNodeMap = useMemo(() => {
+    const nodes = rewindWorkflowQuery.data?.nodes ?? []
+    const m: Record<string, { label: string; type: string }> = {}
+    for (const n of nodes) {
+      m[n.node_id] = { label: n.label || n.node_id, type: n.type }
+    }
+    return m
+  }, [rewindWorkflowQuery.data])
 
   /* ─── Derive start node variables from workflow ─── */
   const editStartNodeVars = useMemo<VariableDefinition[]>(() => {
@@ -320,11 +331,6 @@ export default function TasksPage() {
       setEditTask(null)
       setEditDirty(false)
     },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '更新失败'
-      message.error(msg)
-    },
   })
 
   /* ─── Mutation: delete trigger (取消定时任务) ─── */
@@ -333,11 +339,6 @@ export default function TasksPage() {
     onSuccess: () => {
       message.success('定时任务已删除')
       queryClient.invalidateQueries({ queryKey: ['triggers-list'] })
-    },
-    onError: (err: unknown) => {
-      const msg = err && typeof err === 'object' && 'message' in err
-        ? (err as { message: string }).message : '删除失败'
-      message.error(msg)
     },
   })
 
@@ -474,6 +475,41 @@ export default function TasksPage() {
     setApprovalComment('')
     setApprovalCommentMode('text')
   }, [])
+
+  /* ─── Rewind handlers ─── */
+  const openRewindModal = useCallback(() => {
+    setRewindTargetNode('')
+    setRewindVarsMode('none')
+    // 预填当前 variable_snapshot 作为 JSON 编辑起点
+    const snapshot = taskDetail?.checkpoint?.variable_snapshot
+    setRewindVarsText(snapshot ? JSON.stringify(snapshot, null, 2) : '{}')
+    setRewindModalOpen(true)
+  }, [taskDetail])
+
+  const handleRewind = useCallback(() => {
+    if (!taskDetail) return
+    if (!rewindTargetNode) {
+      message.warning('请选择退回节点')
+      return
+    }
+    let variables: Record<string, unknown> | undefined
+    if (rewindVarsMode === 'json') {
+      try {
+        variables = JSON.parse(rewindVarsText)
+      } catch {
+        message.error('JSON 格式错误，请检查变量输入')
+        return
+      }
+    }
+    interveneMutation.mutate({
+      taskId: taskDetail.id,
+      action: 'rewind',
+      target_node_id: rewindTargetNode,
+      variables,
+      version: taskDetail.version,
+    })
+    setRewindModalOpen(false)
+  }, [taskDetail, rewindTargetNode, rewindVarsMode, rewindVarsText, interveneMutation])
 
   const handleDelete = useCallback((task: TaskSummary) => {
     Modal.confirm({
@@ -863,6 +899,8 @@ export default function TasksPage() {
                   ])
                   const hasAnyApproval = timeline.some(e => approveTypes.has(e.event_type))
                   const filtered = timeline.filter(e => {
+                    // 隐藏 node_start：data 仅 node_id/node_type（已拼进标签），折叠块看起来空
+                    if (e.event_type === 'node_start') return false
                     // 审批已完成 → 隐藏所有 waiting_human
                     if (hasAnyApproval && e.event_type === 'waiting_human') return false
                     // 人工审批节点的 node_complete 只是引擎恢复信号，审批事件已覆盖
@@ -905,6 +943,29 @@ export default function TasksPage() {
                     intervene_cancel:  { label: '人工取消',   color: '#EF4444' },
                     intervene_resume:  { label: '人工恢复',   color: '#1E5EFF' },
                     intervene_retry:    { label: '人工重试',   color: '#F59E0B' },
+                    rewoun:            { label: '已退回重跑', color: '#F59E0B' },
+                  }
+
+                  // 废弃判定：一条 node_complete/node_failed，若其 node_id 出现在其后
+                  // 某个 rewoun 的 rewound_nodes 里，说明它是被退回重跑掉的旧轮 → 标记废弃。
+                  // 旧轮记录的行内 output_summary 是真快照（保留），但其「查看执行详情」按钮
+                  // 取的 checkpointer thread 已被 rewind 清掉覆盖（新轮内容，误导），故禁用。
+                  const supersededIdx = new Set<number>()
+                  for (let i = 0; i < filtered.length; i++) {
+                    const evt = filtered[i]
+                    if (evt.event_type !== 'node_complete' && evt.event_type !== 'node_failed') continue
+                    const nodeId = evt.data?.node_id as string | undefined
+                    if (!nodeId) continue
+                    for (let j = i + 1; j < filtered.length; j++) {
+                      const later = filtered[j]
+                      if (later.event_type === 'rewoun') {
+                        const rewound = (later.data?.rewound_nodes as string[] | undefined) ?? []
+                        if (rewound.includes(nodeId)) {
+                          supersededIdx.add(i)
+                          break
+                        }
+                      }
+                    }
                   }
 
                   return (
@@ -912,6 +973,7 @@ export default function TasksPage() {
                       {/* 连续连接线 */}
                       <div className="absolute left-[9px] top-2 bottom-2 w-[2px] bg-[#E2E8F0]" />
                       {filtered.map((evt, idx) => {
+                        const superseded = supersededIdx.has(idx)
                         const meta = eventMeta[evt.event_type] ?? { label: evt.event_type, color: '#94A3B8' }
 
                         // 节点事件：拼接类型前缀 → "Agent 节点开始" / "输入节点完成"
@@ -928,7 +990,7 @@ export default function TasksPage() {
                         const hasData = Object.keys(evt.data ?? {}).length > 0
 
                         return (
-                          <div key={idx} className="relative py-2">
+                          <div key={idx} className={`relative py-2${superseded ? ' opacity-50' : ''}`}>
                             {/* 时间轴圆点 */}
                             <div
                               className="absolute -left-7 top-2.5 w-[14px] h-[14px] rounded-full border-2 border-white shadow-sm z-10"
@@ -937,20 +999,27 @@ export default function TasksPage() {
                             {/* 事件主体 */}
                             <div className="flex items-baseline gap-2 flex-wrap">
                               <span className="text-xs font-medium" style={{ color: meta.color }}>{displayLabel}</span>
+                              {superseded && <span className="text-[10px] text-[#94A3B8] bg-[#F1F5F9] rounded px-1 py-0.5">已废弃</span>}
                               <span className="text-[11px] text-[#94A3B8]">{formatDateTime(evt.timestamp)}</span>
                               {evt.actor && <span className="text-[11px] text-[#94A3B8]">· {evt.actor}</span>}
                               {/* Agent 节点完成后可查看执行详情 */}
                               {isNodeEvent && nodeType === 'agent' &&
                                 (evt.event_type === 'node_complete' || evt.event_type === 'node_failed') && (
-                                <button
-                                  onClick={() => setNodeDetail({
-                                    taskId: taskDetail.id,
-                                    nodeId: evt.data?.node_id as string,
-                                  })}
-                                  className="text-[10px] text-[#1E5EFF] hover:underline border-0 bg-transparent cursor-pointer p-0 ml-1"
-                                >
-                                  查看执行详情
-                                </button>
+                                superseded ? (
+                                  <Tooltip title="该记录已被退回重跑覆盖，详情不可用">
+                                    <span className="text-[10px] text-[#94A3B8] cursor-not-allowed ml-1">查看执行详情</span>
+                                  </Tooltip>
+                                ) : (
+                                  <button
+                                    onClick={() => setNodeDetail({
+                                      taskId: taskDetail.id,
+                                      nodeId: evt.data?.node_id as string,
+                                    })}
+                                    className="text-[10px] text-[#1E5EFF] hover:underline border-0 bg-transparent cursor-pointer p-0 ml-1"
+                                  >
+                                    查看执行详情
+                                  </button>
+                                )
                               )}
                             </div>
                             {/* 所有数据统一折叠 */}
@@ -1071,44 +1140,52 @@ export default function TasksPage() {
                     ? taskDetail.checkpoint.human_context.options.filter(Boolean)
                     : []
 
-                  if (humanOptions.length === 0) {
-                    // 无选项 → 显示通用"继续"按钮
-                    return (
-                      <Button
-                        type="primary"
-                        icon={<CheckOutlined />}
-                        onClick={() => interveneMutation.mutate({
-                          taskId: taskDetail.id,
-                          action: 'resume',
-                          version: taskDetail.version,
-                          comment: '',
-                        })}
-                        loading={interveneMutation.isPending}
-                      >
-                        继续
-                      </Button>
-                    )
-                  }
-
-                  // 有选项 → 显示批准/驳回按钮
                   return (
                     <>
+                      {humanOptions.length === 0 ? (
+                        // 无选项 → 通用"继续"按钮
+                        <Button
+                          type="primary"
+                          icon={<CheckOutlined />}
+                          onClick={() => interveneMutation.mutate({
+                            taskId: taskDetail.id,
+                            action: 'resume',
+                            version: taskDetail.version,
+                            comment: '',
+                          })}
+                          loading={interveneMutation.isPending}
+                        >
+                          继续
+                        </Button>
+                      ) : (
+                        // 有选项 → 批准/驳回
+                        <>
+                          <Button
+                            type="primary"
+                            icon={<CheckOutlined />}
+                            onClick={() => handleApprove(taskDetail)}
+                            loading={interveneMutation.isPending}
+                            style={{ backgroundColor: '#8B5CF6', borderColor: '#8B5CF6' }}
+                          >
+                            批准
+                          </Button>
+                          <Button
+                            danger
+                            icon={<CloseCircleOutlined />}
+                            onClick={() => handleReject(taskDetail)}
+                            loading={interveneMutation.isPending}
+                          >
+                            驳回
+                          </Button>
+                        </>
+                      )}
+                      {/* 退回重跑：无论有无 human options 都可用 */}
                       <Button
-                        type="primary"
-                        icon={<CheckOutlined />}
-                        onClick={() => handleApprove(taskDetail)}
-                        loading={interveneMutation.isPending}
-                        style={{ backgroundColor: '#8B5CF6', borderColor: '#8B5CF6' }}
-                      >
-                        批准
-                      </Button>
-                      <Button
-                        danger
-                        icon={<CloseCircleOutlined />}
-                        onClick={() => handleReject(taskDetail)}
+                        icon={<RollbackOutlined />}
+                        onClick={openRewindModal}
                         loading={interveneMutation.isPending}
                       >
-                        驳回
+                        退回重跑
                       </Button>
                     </>
                   )
@@ -1219,6 +1296,96 @@ export default function TasksPage() {
             />
           </div>
         </div>
+      </Modal>
+
+      {/* ─── Rewind Modal（退回重跑）─── */}
+      <Modal
+        title="退回重跑"
+        open={rewindModalOpen}
+        onOk={handleRewind}
+        onCancel={() => setRewindModalOpen(false)}
+        okText="确定退回"
+        cancelText="取消"
+        confirmLoading={interveneMutation.isPending}
+        destroyOnClose
+        width={560}
+      >
+        {(() => {
+          if (!taskDetail?.checkpoint) {
+            return <div className="text-sm text-[#94A3B8]">无可回退的执行上下文</div>
+          }
+          const pausedAt = taskDetail.checkpoint.paused_at_node ?? ''
+          const completed = (taskDetail.checkpoint.completed_nodes ?? []).filter(n => n !== pausedAt)
+          const selectOptions = completed.map(n => {
+            const meta = rewindNodeMap[n]
+            return { value: n, label: meta ? `${meta.label} · ${meta.type}` : n }
+          })
+          const wfLoading = rewindWorkflowQuery.isLoading
+          const targetOutput = rewindTargetNode ? taskDetail.variables?.[rewindTargetNode] : undefined
+
+          return (
+            <div className="flex flex-col gap-3 py-2">
+              <p className="text-sm text-[#475569]">
+                选择一个已执行的节点，任务将从该节点重新执行其全部下游。当前审批节点（{pausedAt}）不可选。
+              </p>
+
+              {/* 目标节点选择 */}
+              <div>
+                <label className="block text-sm text-[#0F172A] mb-1.5">退回到节点 <span className="text-red-500">*</span></label>
+                <Select
+                  value={rewindTargetNode || undefined}
+                  onChange={(v: string) => setRewindTargetNode(v)}
+                  placeholder="选择一个已执行的节点"
+                  options={selectOptions}
+                  loading={wfLoading}
+                  disabled={wfLoading || completed.length === 0}
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: '100%' }}
+                  notFoundContent={wfLoading ? <Spin size="small" /> : (completed.length === 0 ? <Empty description="无可回退的节点" /> : null)}
+                />
+              </div>
+
+              {/* 选中节点的当前输出预览（确认退回点）*/}
+              {rewindTargetNode && (
+                <div>
+                  <label className="block text-sm text-[#0F172A] mb-1.5">该节点当前输出</label>
+                  <pre className="text-xs font-mono bg-[#F8FAFC] border border-line rounded-lg p-3 max-h-48 overflow-auto whitespace-pre-wrap break-words text-[#475569]">
+                    {targetOutput === undefined ? '(无输出)' : JSON.stringify(targetOutput, null, 2)}
+                  </pre>
+                </div>
+              )}
+
+              {/* 可选：修改变量 */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-sm text-[#0F172A]">修改变量（可选）</label>
+                  <Segmented
+                    size="small"
+                    value={rewindVarsMode}
+                    onChange={(val) => setRewindVarsMode(val as 'none' | 'json')}
+                    options={[
+                      { label: '不改', value: 'none' },
+                      { label: 'JSON 编辑', value: 'json' },
+                    ]}
+                  />
+                </div>
+                {rewindVarsMode === 'json' && (
+                  <Input.TextArea
+                    value={rewindVarsText}
+                    onChange={(e) => setRewindVarsText(e.target.value)}
+                    placeholder='{"input": {"q": "修改后的值"}}'
+                    rows={6}
+                    className="font-mono"
+                  />
+                )}
+                {rewindVarsMode === 'none' && (
+                  <div className="text-xs text-[#94A3B8]">不修改变量，仅退回并重跑下游节点。</div>
+                )}
+              </div>
+            </div>
+          )
+        })()}
       </Modal>
 
       {/* ─── Edit Scheduled Task Modal ─── */}

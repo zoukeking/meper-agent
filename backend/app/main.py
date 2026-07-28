@@ -1,22 +1,18 @@
 """FastAPI application entry point."""
+import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.api.middleware.exception_mw import ExceptionMiddleware
 from app.api.middleware.logging_mw import LoggingMiddleware
 from app.api.middleware.request_id import RequestIDMiddleware
 from app.api.v1.ext import ExtApiStatsMiddleware
 from app.api.v1.router import api_v1_router
+from app.core.bootstrap import background_boot, init_critical_path, shutdown
 from app.core.config import settings
 from app.core.logging import setup_logging
-from app.db.mongodb import close_mongodb_client
-from app.db.redis import close_redis_client
-from app.services.task_scheduler_service import get_scheduler
-from app.services.trigger_scheduler_service import get_trigger_scheduler
 
 # Initialize structured logging before app creation
 setup_logging()
@@ -24,77 +20,44 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage startup/shutdown lifecycle for external connections."""
-    # Startup: connections are lazy-initialized on first use
-    # Configure harness checkpointer with MongoDB (overrides the default
-    # MemorySaver) so thread state persists across restarts.
-    try:
-        from agent_flow_harness import build_mongo_saver, configure_checkpointer
+    """Manage startup/shutdown lifecycle for external connections.
 
-        from app.db.mongodb import get_mongodb_client
+    Startup is split into:
+    1. **Critical path** (awaited): checkpointer, notification, event bridge.
+    2. **Background boot** (create_task): indexes, schedulers, recovery,
+       channel connections — deferred so the first request isn't blocked.
+    """
+    # Critical path — must complete before serving requests.
+    await init_critical_path()
 
-        saver = build_mongo_saver(
-            client=get_mongodb_client().delegate,
-            db_name=settings.MONGODB_DB_NAME,
-        )
-        configure_checkpointer(saver, overwrite=True)
-    except Exception:
-        pass  # Fall back to harness default MemorySaver
+    # Background boot — indexes/schedulers/recovery/channels.
+    # Store the task reference on app.state to prevent GC, and to allow
+    # graceful shutdown ordering (cancel before closing DB clients).
+    boot_task = asyncio.create_task(background_boot())
+    app.state._boot_task = boot_task
 
-    # Start the Task scheduler for timed/scheduled workflow execution
-    scheduler = get_scheduler()
-    await scheduler.start()
+    # Capture schedulers when background boot completes (best-effort;
+    # if it hasn't finished by shutdown, we cancel it).
+    app.state._scheduler = None
+    app.state._trigger_scheduler = None
 
-    # Initialize Trigger repository and indexes
-    from app.db.mongodb import get_database
-    from app.services.trigger_repo import TriggerRepository
+    async def _capture_schedulers():
+        try:
+            scheduler, trigger_scheduler = await boot_task
+            app.state._scheduler = scheduler
+            app.state._trigger_scheduler = trigger_scheduler
+        except Exception as exc:
+            from loguru import logger
+            logger.error("background_boot_failed error={}", exc)
 
-    trigger_repo = TriggerRepository(get_database())
-    await trigger_repo.ensure_indexes()
-
-    # Start the Trigger scheduler for cron/once workflow triggers
-    trigger_scheduler = get_trigger_scheduler()
-    trigger_scheduler.set_repo(trigger_repo)
-    await trigger_scheduler.start()
-
-    # Initialize system roles (idempotent — only inserts missing roles)
-    from app.services.role_service import RoleService
-    await RoleService.ensure_indexes()
-    await RoleService.init_system_roles()
-
-    # Initialize API Key indexes
-    from app.services.api_key_service import ApiKeyService
-    await ApiKeyService.ensure_indexes()
-
-    # Recover waiting_human tasks from previous server instance
-    from app.services.task_recovery import (
-        recover_orphan_running_tasks,
-        recover_waiting_human_tasks,
-    )
-    await recover_waiting_human_tasks()
-    # Clean up running tasks orphaned by the previous process crash/restart.
-    # run_and_persist executes workflows as in-process asyncio tasks, so a
-    # process death orphans every running task — sweep them on startup.
-    await recover_orphan_running_tasks()
-
-    # Initialize notification service (bridges EventBus → WebSocket + MongoDB)
-    from app.services.notification_service import NotificationService
-    notification_service = NotificationService()
-    notification_service.register()
-
-    # Start Redis pub/sub bridge (bridges Celery worker events → FastAPI EventBus)
-    from app.services.event_bridge import start_event_bridge_listener
-    await start_event_bridge_listener()
+    asyncio.create_task(_capture_schedulers())
 
     yield
 
-    # Shutdown: gracefully close connections
-    from app.services.event_bridge import stop_event_bridge_listener
-    await stop_event_bridge_listener()
-    await trigger_scheduler.stop()
-    await scheduler.stop()
-    await close_mongodb_client()
-    await close_redis_client()
+    # Shutdown — cancel background boot if still running, then graceful stop.
+    if not boot_task.done():
+        boot_task.cancel()
+    await shutdown(app.state._scheduler, app.state._trigger_scheduler)
 
 
 app = FastAPI(
@@ -123,11 +86,6 @@ app.add_middleware(ExtApiStatsMiddleware)
 
 # API routes
 app.include_router(api_v1_router, prefix="/api/v1")
-
-# Static files — serve widget JS for third-party embedding
-_static_dir = Path(__file__).resolve().parent.parent / "static"
-if _static_dir.is_dir():
-    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
 @app.get("/", tags=["root"])

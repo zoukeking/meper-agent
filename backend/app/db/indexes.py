@@ -37,6 +37,12 @@ async def create_indexes() -> None:
     await db.tools.create_index("mcp_connection_id", name="idx_tools_mcp_conn_id")
     logger.info("Created indexes: idx_tools_name, idx_tools_status, idx_tools_source, idx_tools_mcp_conn_id")
 
+    # Knowledge Bases collection (Markdown KB metadata)
+    # name is NOT unique — KB uses _id (kb_ prefix) as the directory name, not name.
+    await db.knowledge_bases.create_index("status", name="idx_kb_status")
+    await db.knowledge_bases.create_index("owner_user_id", name="idx_kb_owner")
+    logger.info("Created indexes: idx_kb_status, idx_kb_owner")
+
     # MCP connections collection (Story 5.3 — MCP connection management)
     await db.mcp_connections.create_index("name", unique=True, name="idx_mcp_conn_name")
     await db.mcp_connections.create_index("status", name="idx_mcp_conn_status")
@@ -83,6 +89,26 @@ async def create_indexes() -> None:
         name="idx_notifications_user_read",
     )
     logger.info("Created indexes: idx_notifications_user_created, idx_notifications_user_read")
+
+    # ── Channels ──
+    await db.channel_configs.create_index(
+        "owner_user_id", name="idx_channel_configs_owner"
+    )
+    await db.channel_configs.create_index(
+        "agent_id", name="idx_channel_configs_agent"
+    )
+    await db.channel_configs.create_index(
+        [("provider", 1), ("name", 1)], name="idx_channel_configs_provider_name"
+    )
+    await db.inbound_event_logs.create_index(
+        [("channel_id", 1), ("platform_message_id", 1)],
+        name="uq_inbound_logs_channel_msg",
+        unique=True,
+    )
+    await db.inbound_event_logs.create_index(
+        [("status", 1), ("created_at", 1)], name="idx_inbound_logs_status_time"
+    )
+    logger.info("Created indexes: idx_channel_configs_owner, idx_channel_configs_agent, idx_channel_configs_provider_name, uq_inbound_logs_channel_msg, idx_inbound_logs_status_time")
 
 
 if __name__ == "__main__":

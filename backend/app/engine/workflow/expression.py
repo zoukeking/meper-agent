@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import ast
 import json
-import operator
 import re
 from typing import Any
 
@@ -34,17 +33,6 @@ _JSON_PATTERN = re.compile(r"^\s*[\[{]")
 
 # Regex to strip markdown code blocks
 _MARKDOWN_CODE_BLOCK = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
-
-# Comparison operators supported in expression evaluation, mapped to their
-# implementations. Defined at module level (not rebuilt on every call).
-_COMPARISON_OPS: dict[str, Any] = {
-    "==": operator.eq,
-    "!=": operator.ne,
-    ">=": operator.ge,
-    "<=": operator.le,
-    ">": operator.gt,
-    "<": operator.lt,
-}
 
 
 def _try_parse_json(value: Any) -> Any:
@@ -116,14 +104,24 @@ class ExpressionEngine:
 
         Returns:
             The resolved value. If *template* contains only a single expression,
-            returns the resolved value directly (not wrapped in a string).
-            If the resolved string contains comparison operators (==, !=, >, <, etc.),
-            evaluates the comparison and returns a boolean.
+            returns the resolved value directly (not wrapped in a string),
+            preserving its original Python type (str/int/float/bool/None/dict/list).
             Otherwise, returns the string with expressions substituted.
+
+        Note:
+            Comparison evaluation (``{{x}} > 18``) is intentionally NOT done
+            here — it previously lived in ``_try_eval_comparison`` but
+            mis-classified any text containing ``>`` / ``<`` (markdown
+            blockquotes, SQL, code, math) as a comparison and returned a
+            bool, silently corrupting values like an Agent node's
+            ``{{prev.response}}`` that happened to contain a ``>``.
+            Gateway nodes use their own ``_gateway_compare`` with explicit
+            ``operator`` / ``expected`` fields, so this implicit behaviour
+            was both harmful and unused.
         """
         if not template or not _EXPRESSION_PATTERN.search(template):
-            # No {{...}} expressions — check if it's a plain comparison
-            return self._try_eval_comparison(template)
+            # No {{...}} expressions — return the template as-is.
+            return template
 
         stripped = template.strip()
 
@@ -135,80 +133,10 @@ class ExpressionEngine:
         # General path: substitute all expressions within the string
         try:
             jinja_template = self._env.from_string(template)
-            rendered = jinja_template.render(self._variables)
+            return jinja_template.render(self._variables)
         except Exception:
             logger.warning("expression_render_failed", template=template[:100])
             return template
-
-        # After substitution, check if result contains comparison operators
-        return self._try_eval_comparison(rendered)
-
-    def _try_eval_comparison(self, expr: str) -> Any:
-        """Try to evaluate a string as a comparison expression.
-
-        Supports: ==, !=, >=, <=, >, <
-        Returns the boolean result if it's a comparison, otherwise returns the original string.
-        """
-        if not isinstance(expr, str):
-            return expr
-
-        # Comparison operators in order of precedence (longer operators first)
-        operators = ["==", "!=", ">=", "<=", ">", "<"]
-
-        for op in operators:
-            if op in expr:
-                parts = expr.split(op, 1)
-                if len(parts) == 2:
-                    left = parts[0].strip()
-                    right = parts[1].strip()
-
-                    # Try to parse both sides as Python literals
-                    left_val = self._parse_value(left)
-                    right_val = self._parse_value(right)
-
-                    # Evaluate the comparison via the module-level operator table.
-                    try:
-                        return _COMPARISON_OPS[op](left_val, right_val)
-                    except TypeError:
-                        # Type mismatch in comparison, return original
-                        pass
-
-                # Only evaluate the first matching operator
-                break
-
-        return expr
-
-    def _parse_value(self, s: str) -> Any:
-        """Parse a string value into its Python type.
-
-        Handles: strings (quoted), numbers, booleans, null/None.
-        """
-        s = s.strip()
-
-        # Quoted string
-        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-            return s[1:-1]
-
-        # Boolean
-        if s.lower() == "true":
-            return True
-        if s.lower() == "false":
-            return False
-
-        # Null/None
-        if s.lower() in ("null", "none"):
-            return None
-
-        # Number
-        try:
-            if "." in s:
-                return float(s)
-            return int(s)
-        except ValueError:
-            pass
-
-        # Return as string (unquoted)
-        return s
 
     def resolve_bool(self, template: str) -> bool:
         """Resolve an expression and coerce the result to bool.
@@ -226,6 +154,27 @@ class ExpressionEngine:
                 return True
             return bool(result)
         return bool(result)
+
+    def resolve_str(self, template: str) -> str:
+        """Resolve an expression and coerce the result to ``str``.
+
+        Always returns a ``str`` (never ``None``/``bool``/``dict``/``list``),
+        safe for direct ``.strip()`` / f-string / message-content usage.
+
+        - ``None`` / unresolved → ``""``（与 :meth:`resolve_bool` 的 fail-safe 一致）
+        - ``dict`` / ``list`` → JSON 文本（``ensure_ascii=False``，便于中文可读）
+        - ``bool`` / ``int`` / ``float`` → ``str()``
+        - ``str`` → 原样返回（含比较运算符的模板会先被 :meth:`resolve` 求值成
+          ``bool``，再经 ``str()`` 转成 ``"True"``/``"False"``）
+        """
+        result = self.resolve(template)
+        if result is None:
+            return ""
+        if isinstance(result, (dict, list)):
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if not isinstance(result, str):
+            return str(result)
+        return result
 
     def resolve_dict(
         self,

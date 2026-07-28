@@ -65,7 +65,7 @@ async def list_builtin_tools(
     ``resolve_harness_context`` injects (see ``_INJECTED_BUILTIN_TOOL_NAMES``).
     The returned set always matches what an Agent can actually call.
     """
-    from agent_flow_harness.tools.builtin import BUILTIN_TOOLS
+    from agent_flow_harness import BUILTIN_TOOLS
 
     from app.engine.harness_integration.context import (
         _CONFIGURABLE_BUILTIN_TOOL_NAMES,
@@ -119,7 +119,7 @@ async def list_prebuilt_tools(
     Prebuilt tools are platform-level integrations (Wikipedia, Web Search,
     etc.) registered at startup via CommunityTool protocol.
     """
-    from agent_flow_harness.tools.registry import TOOL_REGISTRY
+    from agent_flow_harness import TOOL_REGISTRY
 
     tools = []
     for entry in TOOL_REGISTRY.list_community_tools():

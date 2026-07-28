@@ -23,24 +23,53 @@ export interface WorkflowProposal {
   workflow_name: string
   workflow_description: string
   input_preview: Record<string, unknown>
-  has_human_node: boolean
+  /** Optional — only set by the legacy propose_workflow tool_result path;
+   *  the confirm_workflow interrupt path does not carry this. */
+  has_human_node?: boolean
 }
 
 interface WorkflowProposalCardProps {
   proposal: WorkflowProposal
-  onConfirm: (workflowName: string) => void
+  /** Called when the user clicks 确认执行.
+   *  May return a Promise<boolean> that resolves to false when the send was
+   *  suppressed (e.g. another stream is still running); the card then resets
+   *  to idle instead of misleadingly showing "已确认". */
+  onConfirm: (workflowName: string) => Promise<boolean> | boolean | void
+  /** Force the card into a terminal state on mount — used for history
+   *  backfill where the user has already confirmed/rejected (tool_result is
+   *  present) and the card should be read-only. */
+  forceAction?: 'confirmed' | 'rejected'
 }
 
 export default function WorkflowProposalCard({
   proposal,
   onConfirm,
+  forceAction,
 }: WorkflowProposalCardProps) {
-  const [action, setAction] = useState<'idle' | 'confirming' | 'confirmed' | 'rejected'>('idle')
+  const [action, setAction] = useState<'idle' | 'confirming' | 'confirmed' | 'rejected'>(
+    forceAction ?? 'idle',
+  )
+  // Set when the click was suppressed (e.g. clicked during streaming). Shown
+  // inline so the user understands why nothing happened and can retry.
+  const [suppressed, setSuppressed] = useState(false)
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     setAction('confirming')
-    onConfirm(proposal.workflow_name)
-    setAction('confirmed')
+    setSuppressed(false)
+    try {
+      const result = await onConfirm(proposal.workflow_name)
+      // Only flip to "confirmed" when the send actually went through.
+      // A falsey result (suppressed by isStreaming guard) resets the card
+      // so the user can retry instead of seeing a fake "已确认".
+      if (result === false) {
+        setAction('idle')
+        setSuppressed(true)
+      } else {
+        setAction('confirmed')
+      }
+    } catch {
+      setAction('idle')
+    }
   }
 
   const handleReject = () => {
@@ -51,18 +80,18 @@ export default function WorkflowProposalCard({
   const inputEntries = Object.entries(proposal.input_preview)
 
   return (
-    <div className="rounded-lg border border-purple-200 bg-purple-50/60 overflow-hidden">
+    <div className="rounded-lg border border-blue-200 bg-blue-50/60 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-purple-100">
-        <RobotOutlined className="text-purple-500 text-base" />
-        <span className="text-sm font-semibold text-purple-700">工作流确认</span>
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-blue-100">
+        <RobotOutlined className="text-blue-500 text-base" />
+        <span className="text-sm font-semibold text-blue-700">工作流确认</span>
       </div>
 
       {/* Body */}
       <div className="px-4 py-3 space-y-2">
         <div className="flex items-center gap-2">
           <Text type="secondary" className="text-xs">工作流:</Text>
-          <Tag color="purple" className="text-xs">{proposal.workflow_name}</Tag>
+          <Tag color="blue" className="text-xs">{proposal.workflow_name}</Tag>
         </div>
 
         {proposal.workflow_description && (
@@ -99,14 +128,14 @@ export default function WorkflowProposalCard({
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-2 px-4 py-3 border-t border-purple-100 bg-white/50">
+      <div className="flex items-center gap-2 px-4 py-3 border-t border-blue-100 bg-white/50">
         {action === 'idle' && (
           <>
             <Button
               type="primary"
               size="small"
               icon={<CheckCircleOutlined />}
-              className="bg-purple-600 hover:bg-purple-700 border-purple-600 text-xs"
+              className="bg-blue-600 hover:bg-blue-700 border-blue-600 text-xs"
               onClick={handleConfirm}
             >
               确认执行
@@ -120,15 +149,20 @@ export default function WorkflowProposalCard({
             >
               拒绝
             </Button>
+            {suppressed && (
+              <Text className="text-[10px] text-amber-600 ml-1">
+                Agent 正在响应，请稍后重试
+              </Text>
+            )}
           </>
         )}
         {action === 'confirming' && (
-          <Text className="text-xs text-purple-600">正在发送确认...</Text>
+          <Text className="text-xs text-blue-600">正在发送确认...</Text>
         )}
         {action === 'confirmed' && (
           <Text className="text-xs text-green-600">
             <CheckCircleOutlined className="mr-1" />
-            已确认，等待执行...
+            已确认
           </Text>
         )}
         {action === 'rejected' && (

@@ -3,6 +3,12 @@ import os
 
 # Ensure tests don't require a real DB / Redis during import-time config load
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-not-for-prod")
+# Fixed 32-byte key (Base64) for channel/crypto tests that round-trip
+# encrypt_secret → decrypt_secret. NOT for production — test fixture only.
+os.environ.setdefault(
+    "MODEL_ENCRYPTION_KEY",
+    "ZDswO0/08pEWbyhmnBhMZ6L0Sf/esm7VlhjI0Mx8h6A=",
+)
 
 import pytest
 from app.main import app

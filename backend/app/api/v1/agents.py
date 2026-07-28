@@ -43,6 +43,8 @@ def _doc_to_response(doc: dict) -> AgentResponse:
         id=doc["_id"],
         name=doc["name"],
         description=doc.get("description", ""),
+        welcome_message=doc.get("welcome_message", ""),
+        recommended_items=doc.get("recommended_items", []),
         prompt_slots=doc.get("prompt_slots", {}),
         skill_ids=resolve_skill_ids(doc),
         mcp_connection_ids=doc.get("mcp_connection_ids", []),
@@ -115,7 +117,17 @@ async def create_agent(
     body: AgentCreate,
     _: UserResponse = Depends(require_any_role("admin", "developer")),
 ) -> AgentResponse:
-    doc = await AgentService.create_agent(name=body.name, description=body.description)
+    # 新建 Agent 默认启用全部文件类内建工具(bash/read/write/glob/grep)。
+    # 白名单语义不变:这里只是给创建入口一个"默认全选"的初值。
+    # 注意默认值收敛在端点层而非 model/schema,避免 duplicate_agent 复制
+    # 老 Agent 时把空 builtin_config 意外填满(违背"不迁移老数据"的意图)。
+    from app.engine.harness_integration.context import DEFAULT_BUILTIN_CONFIG
+
+    doc = await AgentService.create_agent(
+        name=body.name,
+        description=body.description,
+        builtin_config=list(DEFAULT_BUILTIN_CONFIG),
+    )
     return _doc_to_response(doc)
 
 
@@ -150,6 +162,8 @@ async def update_agent(
         default_model=body.default_model,
         max_retry=body.max_retry,
         max_tokens=body.max_tokens,
+        welcome_message=body.welcome_message,
+        recommended_items=[item.model_dump() for item in body.recommended_items],
     )
     if doc is None:
         raise NotFoundError(code="AGENT_NOT_FOUND", message=f"Agent {agent_id} 不存在")

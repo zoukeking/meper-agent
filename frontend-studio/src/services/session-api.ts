@@ -59,10 +59,27 @@ export interface ChatFileUploadResponse {
 }
 
 export interface TimelineEntryData {
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'tool' | 'text' | 'final_answer'
+  type:
+    | 'thinking'
+    | 'tool_call'
+    | 'tool_result'
+    | 'tool'
+    | 'text'
+    | 'final_answer'
+    | 'interrupt'
+    | 'tool_call_start'
   content?: string
   tool_name?: string
   args?: Record<string, unknown>
+  /** For tool_result: structured success/error status from backend. */
+  status?: 'success' | 'error'
+  /** For interrupt entries: discriminates clarification vs workflow_confirmation. */
+  kind?: 'clarification' | 'workflow_confirmation'
+  /** For workflow_confirmation interrupt entries (confirm_workflow tool). */
+  question?: string
+  workflow_name?: string
+  workflow_description?: string
+  input_preview?: Record<string, unknown>
 }
 
 export interface SessionListResponse {

@@ -192,6 +192,10 @@ export interface TaskIntervenePayload {
   reason?: string
   comment?: CommentValue
   version: number
+  /** rewind 专用：回退到的目标节点（必须是已执行过的节点） */
+  target_node_id?: string
+  /** rewind 可选：覆盖变量池的输入值（merge 语义） */
+  variables?: Record<string, unknown>
 }
 
 export interface TaskInterveneResponse {

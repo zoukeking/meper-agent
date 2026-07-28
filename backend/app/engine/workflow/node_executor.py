@@ -253,16 +253,19 @@ class AgentNodeExecutor(BaseNodeExecutor):
         engine = ExpressionEngine(variables)
 
         # input_query → user message（查询）
+        # resolve_str 保证返回 str：input 经 dispatch_workflow 落库时可能是
+        # bool/int/dict（LLM 给的 JSON 原生类型），裸 resolve 会返回原类型，
+        # 下游 .strip() 会抛 AttributeError。统一用 resolve_str 归一化。
         input_query = self.node_config.get("input_query", "")
-        resolved_query = engine.resolve(input_query) if input_query else ""
+        resolved_query = engine.resolve_str(input_query) if input_query else ""
 
         # input_prompt → context 卡槽覆盖（注入系统提示，不作为 user message）
         # 向后兼容：也读取 slot_values.context
         input_prompt = self.node_config.get("input_prompt", "")
-        resolved_context = engine.resolve(input_prompt) if input_prompt else ""
+        resolved_context = engine.resolve_str(input_prompt) if input_prompt else ""
         if not resolved_context:
             legacy_slot_ctx = self.node_config.get("slot_values", {}).get("context", "")
-            resolved_context = engine.resolve(legacy_slot_ctx) if legacy_slot_ctx else ""
+            resolved_context = engine.resolve_str(legacy_slot_ctx) if legacy_slot_ctx else ""
 
         try:
             from langchain_core.messages import SystemMessage

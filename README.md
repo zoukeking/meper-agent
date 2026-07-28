@@ -64,7 +64,7 @@ agent-flow/
 │   ├── docker-compose.dev.yml
 │   ├── Dockerfile.caddy  # 前端静态服务 + 反向代理
 │   └── Dockerfile.sandbox# Agent 命令沙盒镜像
-├── agent-flow-widget/    # 访客端嵌入式聊天插件（Preact + Shadow DOM）
+├── frontend-client/      # 终端用户对话客户端（React + Ant Design）
 ├── docs/                 # 项目文档
 └── README.md
 ```
@@ -177,7 +177,22 @@ python -m app.cli create-admin \
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 4. 启动前端
+### 4. 启动 Celery Worker
+
+工作流执行、Webhook 投递、定时任务等异步任务由 Celery worker 处理，需单独启动（新开一个终端）：
+
+```bash
+cd backend
+source .venv/bin/activate  # 或 uv run 前缀
+
+celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+```
+
+> **不启动 Worker 的影响**：创建工作流任务后会一直停留在 `pending` 状态，Agent 不会执行；Webhook 投递不会触发。Agent 会话聊天（直接调用 LLM）不受影响，因为它走的是 FastAPI 同步流式接口，不经过 Celery。
+
+> **定时触发器**（cron/once）由 `TriggerSchedulerService` 在 FastAPI 进程内轮询，不依赖 Celery Beat。Beat 仅用于 `cleanup_expired_workspaces` 定时清理，本地开发可不启动。
+
+### 5. 启动前端
 
 ```bash
 cd frontend
@@ -192,7 +207,7 @@ npm install
 npm run dev
 ```
 
-### 5. 访问应用
+### 6. 访问应用
 
 | 地址 | 说明 |
 |------|------|
@@ -369,46 +384,15 @@ make deploy-check
 | Node.js | 22.x（含 npm） |
 | Python 数据科学栈 | pandas, numpy, scipy, matplotlib, openpyxl |
 
-## Chat Widget（访客端嵌入式聊天插件）
+## 终端用户客户端（frontend-client）
 
-项目内置一个可嵌入任意前端页面的轻量级聊天插件（`agent-flow-widget/`），通过 API Key 认证调用 agent-flow 后端 Agent，适用于客服、FAQ、外部用户交互等场景。
-
-### 特性
-
-- 轻量级（gzip 后 ~13KB），基于 Preact + Vite
-- Shadow DOM 样式隔离，不影响宿主页面
-- 响应式设计，支持拖拽调整窗口大小
-- API Key 认证 + 多访客会话隔离（visitor_id）
-- 历史会话管理（查看 / 切换 / 删除）
-- 预定义引导问题
-- 完整的 timeline 渲染（工具调用、thinking、interrupt 澄清卡片）
-
-### 使用方式
-
-后端通过 `/static/` 托管编译后的 widget JS，在目标页面引入即可：
-
-```html
-<script src="https://your-agent-flow.com/static/agent-chat.js"></script>
-<script>
-  AgentChat.init({
-    apiKey: 'sk-xxx',           // 必填：在管理后台创建 API Key
-    agentId: 'agent-123',       // 必填：目标 Agent ID
-    apiBaseUrl: 'https://your-agent-flow.com',  // 必填：后端地址
-    title: '智能助手',           // 可选：窗口标题，默认 "AI 助手"
-    position: 'bottom-right',   // 可选：浮动按钮位置
-  });
-</script>
-```
-
-> 详细文档见 [`agent-flow-widget/README.md`](agent-flow-widget/README.md)。
-
-### 本地开发
+面向终端用户的独立对话客户端（`frontend-client/`），基于 React + Ant Design，通过 JWT 登录使用。生产环境由 Caddy 托管在 `/client/` 路径，开发环境端口 3001。
 
 ```bash
-cd agent-flow-widget
+cd frontend-client
 npm install
-npm run dev    # 启动测试页面 http://localhost:5174
-npm run build  # 编译到 backend/static/ 供后端托管
+npm run dev    # 启动开发服务器 http://localhost:3001
+npm run build  # 生产构建
 ```
 
 ## 路径变量说明（HOST_DIR vs CONTAINER_DIR）

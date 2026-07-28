@@ -3,6 +3,10 @@ export interface Agent {
   name: string;
   avatar: string;
   description: string;
+  /** 终端用户首屏欢迎词（Markdown）— 后端 welcome_message */
+  welcomeMessage?: string;
+  /** 终端用户首屏推荐问题/操作 — 后端 recommended_items */
+  recommendedItems?: { label: string; prompt: string }[];
   model: string;
   temperature: number;
   systemPrompt: string;
@@ -108,15 +112,6 @@ export interface ExecutionLog {
   }[];
 }
 
-export interface ApiKey {
-  id: string;
-  name: string;
-  keyPreview: string;
-  created: string;
-  lastUsed: string;
-  status: 'active' | 'revoked';
-}
-
 /** Token usage for an agent message (mirrors backend token_usage / SSE done usage). */
 export interface TokenUsage {
   total_tokens?: number;
@@ -124,6 +119,27 @@ export interface TokenUsage {
   output_tokens?: number;
   llm_calls?: number;
   tool_calls?: number;
+}
+
+/** Timeline entry types for agent messages (mirrors frontend chat-panel). */
+export type TimelineEntryType = 'thinking' | 'tool' | 'text' | 'error';
+export type ToolStatus = 'pending' | 'running' | 'success' | 'error';
+
+/** A single entry in an agent message's timeline. Agent messages render as an
+ *  ordered list of these entries (text / tool / thinking / error), so multi-
+ *  turn REACT (text→tool→text→tool) keeps correct chronological order. */
+export interface TimelineEntry {
+  id: string;
+  type: TimelineEntryType;
+  /** text/error/thinking 的正文 */
+  content: string;
+  /** tool 类型专用 */
+  toolName?: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  toolStatus?: ToolStatus;
+  /** 折叠态（thinking / tool 详情） */
+  expanded?: boolean;
 }
 
 export interface Message {
@@ -144,12 +160,22 @@ export interface Message {
    *  source 决定取数路径：upload 走 getFileBlob(ref)（FileRef.id），
    *  output 走 sessionApi.previewFile(sid, ref)（output/ 相对路径）。 */
   attachments?: ChatAttachment[];
+  /** Agent 消息的 timeline（text/tool/thinking/error 按顺序）。
+   *  agent 消息靠此字段渲染；扁平 tool* 字段仅过渡期保留。 */
+  timeline?: TimelineEntry[];
+  /** Agent 经 interrupt 暂停，等待用户回答（ask_clarification /
+   *  confirm_workflow）。为 true 时，timeline 里未答的 tool entry 卡片
+   *  可交互，下一次发送走 /resume。 */
+  isInterrupted?: boolean;
   /** Structured tool-call fields. When `status === 'tool'`, the message is
-   *  rendered as a ToolCallCard instead of a plain text bubble. */
+   *  rendered as a ToolCallCard instead of a plain text bubble. (过渡期保留) */
   toolName?: string;
   toolArgs?: Record<string, unknown>;
   toolResult?: string;
-  toolStatus?: 'running' | 'success' | 'error';
+  toolStatus?: ToolStatus;
+  /** ask_clarification 等待用户回答时为 true（卡片可交互，回答走 /resume）。
+   *  (过渡期保留，新代码用 isInterrupted + timeline entry) */
+  clarificationActive?: boolean;
   /** Token usage for this agent message (history: rec.token_usage; stream: done event usage). */
   usage?: TokenUsage;
 }

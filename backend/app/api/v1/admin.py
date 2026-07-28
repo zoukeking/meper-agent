@@ -183,3 +183,64 @@ async def reset_password(
         )
 
     return PasswordResetResponse(message="密码已重置")
+
+
+# ---------------------------------------------------------------------------
+# Execution statistics — cross-channel agent-execution overview (admin)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/execution-stats",
+    summary="Execution stats grouped by access channel (admin)",
+    responses={403: {"description": "Forbidden — admin role required"}},
+)
+async def get_execution_stats(
+    start: str | None = Query(None, description="ISO datetime (inclusive lower bound)"),
+    end: str | None = Query(None, description="ISO datetime (exclusive upper bound)"),
+    date: str | None = Query(None, description="ISO date for a single day (overrides start/end)"),
+    _: UserResponse = Depends(require_role(UserRole.ADMIN)),
+) -> dict:
+    """Aggregate agent-execution stats across three access channels:
+    ``internal`` (platform users), ``api_key`` (third-party widget/ext),
+    and ``im`` (IM channels).
+
+    Use ``date`` for a single-day view, or ``start``/``end`` for a range.
+    Omit all three for all-time totals.
+    """
+    from app.services.execution_stats_service import ExecutionStatsService
+
+    return await ExecutionStatsService.get_stats(start=start, end=end, date=date)
+
+
+@router.get(
+    "/execution-logs",
+    summary="Execution log detail (admin)",
+    responses={403: {"description": "Forbidden — admin role required"}},
+)
+async def list_execution_logs(
+    source: str | None = Query(None, description="Filter by channel: internal | api_key | im"),
+    agent_id: str | None = Query(None, description="Filter by agent ID"),
+    session_id: str | None = Query(None, description="Filter by session ID"),
+    start: str | None = Query(None, description="ISO datetime (inclusive lower bound)"),
+    end: str | None = Query(None, description="ISO datetime (exclusive upper bound)"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=200, description="Items per page"),
+    _: UserResponse = Depends(require_role(UserRole.ADMIN)),
+) -> dict:
+    """Paginated execution-log detail across all channels (admin).
+
+    Each record is one agent invocation (invoke/stream/resume), independent
+    of session lifecycle — deleting a session does not remove its log here.
+    """
+    from app.services.execution_log_service import ExecutionLogService
+
+    items, total = await ExecutionLogService.list_logs(
+        source=source,
+        agent_id=agent_id,
+        session_id=session_id,
+        start=start,
+        end=end,
+        page=page,
+        page_size=page_size,
+    )
+    return {"items": items, "total": total, "page": page, "page_size": page_size}

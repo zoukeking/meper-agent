@@ -26,6 +26,8 @@ export interface ApiKey {
   status: ApiKeyStatus
   expires_at: string | null
   last_used_at: string | null
+  /** 接入方 introspection 端点 URL。空=兼容模式(visitor_id);有值=回调验证模式(强制 X-User-Token)。 */
+  user_info_url: string
   created_at: string
   updated_at: string
 }
@@ -41,6 +43,7 @@ export interface ApiKeyCreateInput {
   bindings?: ApiKeyBindings
   rate_limit?: number
   expires_at?: string | null
+  user_info_url?: string | null
 }
 
 export interface ApiKeyUpdateInput {
@@ -49,6 +52,7 @@ export interface ApiKeyUpdateInput {
   bindings?: ApiKeyBindings
   rate_limit?: number
   expires_at?: string | null
+  user_info_url?: string | null
 }
 
 export interface ApiKeyListParams {

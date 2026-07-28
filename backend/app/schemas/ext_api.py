@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.models.agent import RecommendedItem
+
 
 class ExtAgentCapabilities(BaseModel):
     """Agent capabilities visible to external systems."""
@@ -20,6 +22,10 @@ class ExtAgentResponse(BaseModel):
     capabilities: ExtAgentCapabilities
     default_model: str = ""
     status: str
+    welcome_message: str = Field(default="", description="终端用户首屏欢迎词（Markdown）")
+    recommended_items: list[RecommendedItem] = Field(
+        default_factory=list, description="终端用户首屏推荐问题/操作快捷项"
+    )
 
 
 class ExtAgentListResponse(BaseModel):
@@ -48,6 +54,18 @@ class ExtInvokeRequest(BaseModel):
         default=None,
         description="前端生成的访客 ID，用于会话隔离",
     )
+    enable_thinking: bool = Field(
+        default=False,
+        description="启用 LLM 原生推理（与内部 /v1/agents/*/stream 一致）",
+    )
+    file_paths: list[str] | None = Field(
+        default=None,
+        description="本次上传文件相对路径列表（相对 workspace input/ 目录）",
+    )
+    file_ids: list[str] | None = Field(
+        default=None,
+        description="本次上传文件 ID 列表",
+    )
 
 
 class ExtInvokeResponse(BaseModel):
@@ -69,6 +87,10 @@ class ExtResumeRequest(BaseModel):
         min_length=1,
         max_length=50000,
         description="对 Agent 追问的回答",
+    )
+    enable_thinking: bool = Field(
+        default=False,
+        description="启用 LLM 推理模式（与内部 /v1/agents/*/resume 一致）",
     )
     visitor_id: str | None = Field(
         default=None,

@@ -1,9 +1,10 @@
 """内建工具汇总 — harness 自带的三层能力型/文件shell 工具清单。
 
-本模块集中定义 ``BUILTIN_TOOLS``（name → BaseTool 实例），供：
-- AgentConfig ``builtin_tools`` 字段便捷启用（opt-out 模式，默认全开）
-- tool_search / 文档生成发现可用内建工具
-- create_agent 内部按需合并到工具列表
+本模块集中定义 ``BUILTIN_TOOLS``（name → BaseTool 实例），作为"能力清单"
+供应用层按需取用。注意：``BUILTIN_TOOLS`` 本身只是一个注册表，**不会**被
+自动注入到任何 Agent —— 实际注入哪些内建工具，由应用层
+``app.engine.harness_integration.context.resolve_harness_context`` 按 Agent 的
+``builtin_config`` 白名单（opt-in）决定。
 
 三层工具模型（SPEC §Always）：
 - 第一层（能力型）：delegate_to_subagent / ask_clarification / tool_search

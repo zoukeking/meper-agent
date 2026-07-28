@@ -106,3 +106,47 @@ async def test_cancel_checker_false_runs_normally(
     result = await graph.ainvoke(base_state, config=config)
     assert "__interrupt__" not in result
     assert result["messages"][-1].content == "done"
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_becomes_tool_message(
+    agent_doc: dict, base_state, fake_llm_factory, make_run_config
+) -> None:
+    """A tool raising ToolException (e.g. MCP isError=true) must be turned into
+    an error ToolMessage returned to the LLM — NOT re-raised to kill the agent
+    flow.
+
+    Regression: the default ToolNode handle_tool_errors only catches
+    ToolInvocationError, so a ToolException (what langchain-mcp-adapters raises
+    on MCP ``isError=true``) used to bubble up and terminate the whole graph.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.tools import StructuredTool, ToolException
+
+    def _boom(**_kwargs):  # noqa: ANN202
+        # 模拟 MCP adapter 对 isError=true 的处理（langchain_mcp_adapters/
+        # tools.py:_convert_call_tool_result 抛的就是 ToolException）。
+        msg = "User Name or Password is Invalid!"
+        raise ToolException(msg)
+
+    boom = StructuredTool.from_function(_boom, name="boom", description="raises")
+
+    # 第一轮：LLM 发起 tool_call；第二轮：LLM 看到错误 ToolMessage 后改用文本回复。
+    llm = fake_llm_factory([
+        AIMessage(content="", tool_calls=[{"name": "boom", "args": {}, "id": "c1"}]),
+        AIMessage(content="登录失败，请检查凭证"),
+    ])
+    config = make_run_config(llm, tools=[boom])
+
+    graph = build_agent_graph(agent_doc, tools=[boom], middleware=[])
+    result = await graph.ainvoke(base_state, config=config)
+
+    # 1. 不抛异常、正常结束（修复前会崩）
+    # 2. 有一条 status="error" 的 ToolMessage，内容含错误信息
+    tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].status == "error"
+    assert "User Name or Password is Invalid!" in tool_msgs[0].content
+    # 3. LLM 看到错误后用文本收尾（REACT 循环继续、没有被工具错误打断）
+    assert result["messages"][-1].content == "登录失败，请检查凭证"
+    assert result["messages"][-1].tool_calls == []

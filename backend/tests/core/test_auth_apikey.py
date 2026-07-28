@@ -1,8 +1,10 @@
 """Tests for API Key generation, verification, and auth principal."""
 
+from unittest.mock import AsyncMock
+
 import pytest
-from app.core.auth_apikey import ApiKeyPrincipal
-from app.core.errors import ForbiddenError
+from app.core.auth_apikey import ApiKeyPrincipal, get_api_key_principal
+from app.core.errors import AppError, ForbiddenError, UnauthorizedError
 from app.services.api_key_service import (
     _extract_prefix,
     _generate_raw_key,
@@ -160,3 +162,167 @@ class TestApiKeyPrincipal:
         with pytest.raises(ForbiddenError) as exc:
             p.require_workflow_access("wf_02")
         assert exc.value.code == "APIKEY_WORKFLOW_DENIED"
+
+
+class TestGetApiKeyPrincipal:
+    """End-to-end tests for the ``get_api_key_principal`` dependency.
+
+    Covers both legacy mode (``user_info_url`` empty) and callback-verification
+    mode (``user_info_url`` set), plus all error branches added in Story 8.2.
+    """
+
+    @pytest.fixture
+    def legacy_doc(self):
+        return {
+            "_id": "apikey_01",
+            "owner_user_id": "user_owner",
+            "scopes": ["agents:invoke"],
+            "bindings": {"agents": [], "workflows": []},
+            "rate_limit": 60,
+            "user_info_url": "",
+        }
+
+    @pytest.fixture
+    def callback_doc(self):
+        return {
+            "_id": "apikey_02",
+            "owner_user_id": "user_owner",
+            "scopes": ["agents:invoke"],
+            "bindings": {"agents": [], "workflows": []},
+            "rate_limit": 60,
+            "user_info_url": "https://partner.example.com/introspect",
+        }
+
+    def _make_request(self, headers: dict | None = None):
+        from starlette.requests import Request
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/ext/agents/x/invoke",
+            "headers": [
+                (k.lower().encode("latin-1"), v.encode("latin-1"))
+                for k, v in (headers or {}).items()
+            ],
+            "query_string": b"",
+        }
+        return Request(scope)
+
+    async def test_legacy_mode_user_id_stays_none(self, monkeypatch, legacy_doc):
+        """AC4: legacy mode does not touch user_id; route layer composes it."""
+        from app.services.api_key_service import ApiKeyService
+
+        monkeypatch.setattr(
+            ApiKeyService, "verify_key", AsyncMock(return_value=legacy_doc)
+        )
+        # Even if X-User-Token is present, legacy mode ignores it.
+        request = self._make_request({"X-User-Token": "Bearer some-token"})
+
+        principal = await get_api_key_principal(
+            request, authorization="Bearer af_live_test"
+        )
+
+        assert principal.user_info_url == ""
+        assert principal.user_id is None  # Route layer composes from visitor_id.
+
+    async def test_callback_mode_resolves_user_id(self, monkeypatch, callback_doc):
+        """AC5: callback mode resolves user_id from introspection."""
+        from app.services.api_key_service import ApiKeyService
+        from app.services.user_auth_service import IntrospectionResult
+
+        monkeypatch.setattr(
+            ApiKeyService, "verify_key", AsyncMock(return_value=callback_doc)
+        )
+        monkeypatch.setattr(
+            "app.services.user_auth_service.UserAuthService.introspect",
+            AsyncMock(
+                return_value=IntrospectionResult(
+                    active=True, sub="user-123", username="zhangsan"
+                )
+            ),
+        )
+        request = self._make_request({"X-User-Token": "Bearer abc"})
+
+        principal = await get_api_key_principal(
+            request, authorization="Bearer af_live_test"
+        )
+
+        assert principal.user_info_url == callback_doc["user_info_url"]
+        assert principal.user_id == "user_owner:user-123"
+
+    async def test_callback_mode_missing_token_raises(self, monkeypatch, callback_doc):
+        """AC5: missing X-User-Token in callback mode → EXT_USER_TOKEN_MISSING."""
+        from app.services.api_key_service import ApiKeyService
+
+        monkeypatch.setattr(
+            ApiKeyService, "verify_key", AsyncMock(return_value=callback_doc)
+        )
+        request = self._make_request({})
+
+        with pytest.raises(UnauthorizedError) as exc:
+            await get_api_key_principal(request, authorization="Bearer af_live_test")
+        assert exc.value.code == "EXT_USER_TOKEN_MISSING"
+
+    async def test_callback_mode_invalid_token_raises(self, monkeypatch, callback_doc):
+        """AC5: introspection active=false → EXT_USER_TOKEN_INVALID."""
+        from app.services.api_key_service import ApiKeyService
+        from app.services.user_auth_service import IntrospectionResult
+
+        monkeypatch.setattr(
+            ApiKeyService, "verify_key", AsyncMock(return_value=callback_doc)
+        )
+        monkeypatch.setattr(
+            "app.services.user_auth_service.UserAuthService.introspect",
+            AsyncMock(return_value=IntrospectionResult(active=False)),
+        )
+        request = self._make_request({"X-User-Token": "Bearer expired"})
+
+        with pytest.raises(UnauthorizedError) as exc:
+            await get_api_key_principal(request, authorization="Bearer af_live_test")
+        assert exc.value.code == "EXT_USER_TOKEN_INVALID"
+
+    async def test_callback_mode_missing_sub_raises(self, monkeypatch, callback_doc):
+        """AC5: introspection returned active=true but no sub → EXT_USER_TOKEN_INVALID."""
+        from app.services.api_key_service import ApiKeyService
+        from app.services.user_auth_service import IntrospectionResult
+
+        monkeypatch.setattr(
+            ApiKeyService, "verify_key", AsyncMock(return_value=callback_doc)
+        )
+        monkeypatch.setattr(
+            "app.services.user_auth_service.UserAuthService.introspect",
+            AsyncMock(return_value=IntrospectionResult(active=True, sub="")),
+        )
+        request = self._make_request({"X-User-Token": "Bearer weird"})
+
+        with pytest.raises(UnauthorizedError) as exc:
+            await get_api_key_principal(request, authorization="Bearer af_live_test")
+        assert exc.value.code == "EXT_USER_TOKEN_INVALID"
+
+    async def test_callback_mode_service_unavailable_propagates(
+        self, monkeypatch, callback_doc
+    ):
+        """AC7: AppError(503/504) from introspection propagates unchanged."""
+        from app.services.api_key_service import ApiKeyService
+
+        monkeypatch.setattr(
+            ApiKeyService, "verify_key", AsyncMock(return_value=callback_doc)
+        )
+
+        async def _raise(*_):
+            raise AppError(
+                code="EXT_USER_SERVICE_UNAVAILABLE",
+                message="down",
+                status_code=503,
+            )
+
+        monkeypatch.setattr(
+            "app.services.user_auth_service.UserAuthService.introspect",
+            _raise,
+        )
+        request = self._make_request({"X-User-Token": "Bearer abc"})
+
+        with pytest.raises(AppError) as exc:
+            await get_api_key_principal(request, authorization="Bearer af_live_test")
+        assert exc.value.code == "EXT_USER_SERVICE_UNAVAILABLE"
+        assert exc.value.status_code == 503

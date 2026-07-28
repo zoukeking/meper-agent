@@ -87,6 +87,7 @@ class ApiKeyService:
         bindings: dict | None = None,
         rate_limit: int = 60,
         expires_at: str | None = None,
+        user_info_url: str = "",
     ) -> tuple[dict, str]:
         """Create a new API Key.
 
@@ -137,6 +138,7 @@ class ApiKeyService:
             bindings=bindings_model,
             rate_limit=rate_limit,
             expires_at=expires_at,
+            user_info_url=user_info_url,
         )
 
         doc = {
@@ -151,6 +153,7 @@ class ApiKeyService:
             "status": api_key.status.value,
             "expires_at": api_key.expires_at,
             "last_used_at": api_key.last_used_at,
+            "user_info_url": api_key.user_info_url,
             "created_at": api_key.created_at,
             "updated_at": api_key.updated_at,
         }
@@ -220,6 +223,7 @@ class ApiKeyService:
         bindings: dict | None = None,
         rate_limit: int | None = None,
         expires_at: str | None = None,
+        user_info_url: str | None = None,
     ) -> dict | None:
         """Update an API Key's configuration.
 
@@ -269,6 +273,9 @@ class ApiKeyService:
 
         if expires_at is not None:
             set_fields["expires_at"] = expires_at
+
+        if user_info_url is not None:
+            set_fields["user_info_url"] = user_info_url
 
         await col.update_one({"_id": api_key_id}, {"$set": set_fields})
 

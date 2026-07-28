@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, FormEvent, useCallback, type MouseEvent, type ChangeEvent } from 'react';
-import { Agent, Message, type ChatAttachment } from '../types';
+import { Agent, Message, type ChatAttachment, type TimelineEntry } from '../types';
 import {
   Send, Plus, ChevronDown, Sparkles, Trash2, FileCode, CheckCircle,
   Bot, Terminal, Loader2, Paperclip, Brain, X,
@@ -18,6 +18,9 @@ import { SessionFilesPanel, type SessionFilesPanelHandle } from './SessionFilesP
 import { Markdown } from './Markdown';
 import { detectPreviewKind } from './FilePreview';
 import { FilePreviewModal } from './FilePreviewModal';
+import { WorkflowTaskCard, parseTaskCreated } from './WorkflowTaskCard';
+import WorkflowProposalCard from './workflow-proposal-card';
+import { ClarificationFormCard, type ClarificationField } from './clarification-form-card';
 
 interface ChatHomepageProps {
   /** Studio agents already adapted to the view model; if absent we fetch. */
@@ -51,134 +54,116 @@ export function parseOutputAttachments(text: string): ChatAttachment[] {
   return out;
 }
 
-function agentMessageToDisplay(rec: MessageRecord, agentName: string, avatar: string): Message[] {
-  const out: Message[] = [];
-  // Merge adjacent tool_call + tool_result into a single structured tool
-  // message (status-colored card with args + result). Pending tool_calls
-  // (no matching result yet) stay as "running".
-  const pendingTools = new Map<string, number>();
-  // aba1d62: agent 文本存在 timeline 的 type="text" 条目里（不再有顶层 content
-  // 字段）；final_answer 是旧名。这里收集起来，在下方渲染为最终回复气泡。
-  const textParts: string[] = [];
-  for (const entry of rec.timeline_entries ?? []) {
+/** Convert a persisted backend agent MessageRecord into a single studio
+ *  Message whose `timeline` carries text/tool/thinking/error entries in
+ *  chronological order (mirrors frontend historyEntryToTimeline). Tool_call
+ *  + tool_result are merged into one tool entry; an unanswered
+ *  ask_clarification/confirm_workflow tool_call stays interactive
+ *  (isInterrupted). Output-file attachments parsed from tool results are
+ *  attached to the message. */
+function agentMessageToDisplay(rec: MessageRecord, agentName: string, avatar: string): Message {
+  const timeline: TimelineEntry[] = [];
+  // Map tool_name → index of the last pending tool_call entry (for merging
+  // the matching tool_result).
+  const pendingToolCalls = new Map<string, number>();
+  const outputAtts: ChatAttachment[] = [];
+  let isInterrupted = false;
+
+  for (let i = 0; i < (rec.timeline_entries ?? []).length; i++) {
+    const entry = (rec.timeline_entries ?? [])[i];
     if (entry.type === 'text' || entry.type === 'final_answer') {
       const t = (entry.content ?? '').trim();
-      if (t) textParts.push(t);
-      continue;
-    }
-    if (entry.type === 'thinking') {
-      out.push({
-        id: `${rec._id}-think`,
-        senderName: agentName,
-        avatar,
-        role: 'agent',
-        content: entry.content ?? '',
-        timestamp: '',
-        status: 'thinking',
-      });
+      if (t) timeline.push({ id: `${rec._id}-text-${i}`, type: 'text', content: t });
+    } else if (entry.type === 'thinking') {
+      timeline.push({ id: `${rec._id}-think-${i}`, type: 'thinking', content: entry.content ?? '' });
+    } else if ((entry.type as string) === 'error') {
+      timeline.push({ id: `${rec._id}-err-${i}`, type: 'error', content: `❌ ${entry.content || '执行出错'}` });
     } else if (entry.type === 'tool_call' || entry.type === 'tool') {
-      // `tool` is an already-merged entry from the backend; treat like a call.
       const name = entry.tool_name ?? '';
-      const isError = typeof entry.content === 'string' && /\b(error|fail)/i.test(entry.content);
-      const idx = out.push({
-        id: `${rec._id}-tool-${name}-${out.length}`,
-        senderName: agentName,
-        avatar,
-        role: 'agent',
+      // tool entry (already merged by backend) or tool_call (need merge).
+      const isError =
+        entry.type === 'tool' &&
+        typeof entry.content === 'string' &&
+        /\b(error|fail)/i.test(entry.content);
+      const isInterruptTool = name === 'ask_clarification' || name === 'confirm_workflow';
+      const idx = timeline.push({
+        id: `${rec._id}-tool-${name}-${i}`,
+        type: 'tool',
         content: '',
-        timestamp: '',
-        status: 'tool',
         toolName: name,
-        toolArgs: entry.args,
-        toolStatus: entry.type === 'tool' ? (isError ? 'error' : 'success') : 'running',
-        toolResult: entry.type === 'tool' ? entry.content : undefined,
+        args: entry.args,
+        toolStatus: isInterruptTool
+          ? 'success'
+          : entry.type === 'tool'
+            ? (isError ? 'error' : 'success')
+            : 'running',
+        result: entry.type === 'tool' ? entry.content : undefined,
       }) - 1;
-      if (entry.type === 'tool_call' && name) pendingTools.set(name, idx);
+      if (entry.type === 'tool_call' && name) pendingToolCalls.set(name, idx);
+      // 收集 output 产物。
+      if (entry.type === 'tool' && typeof entry.content === 'string') {
+        outputAtts.push(...parseOutputAttachments(entry.content));
+      }
     } else if (entry.type === 'tool_result') {
       const name = entry.tool_name ?? '';
-      const pendingIdx = name ? pendingTools.get(name) : undefined;
-      if (pendingIdx !== undefined && out[pendingIdx]) {
-        // Merge into the matching tool_call entry.
-        const isError = typeof entry.content === 'string' && /\b(error|fail)/i.test(entry.content);
-        out[pendingIdx] = {
-          ...out[pendingIdx],
-          toolResult: entry.content ?? '',
+      // 优先用后端的 status 字段判错，回退正则。
+      const isError =
+        entry.status === 'error' ||
+        (typeof entry.content === 'string' && /\b(error|fail)/i.test(entry.content));
+      const pendingIdx = name ? pendingToolCalls.get(name) : undefined;
+      if (pendingIdx !== undefined && timeline[pendingIdx]) {
+        timeline[pendingIdx] = {
+          ...timeline[pendingIdx],
+          result: entry.content ?? '',
           toolStatus: isError ? 'error' : 'success',
         };
-        pendingTools.delete(name);
+        pendingToolCalls.delete(name);
       } else {
-        // Standalone result — render as its own completed tool card.
-        const isError = typeof entry.content === 'string' && /\b(error|fail)/i.test(entry.content);
-        out.push({
-          id: `${rec._id}-tool-${name}-${out.length}`,
-          senderName: agentName,
-          avatar,
-          role: 'agent',
+        timeline.push({
+          id: `${rec._id}-tool-${name}-${i}`,
+          type: 'tool',
           content: '',
-          timestamp: '',
-          status: 'tool',
           toolName: name,
-          toolResult: entry.content ?? '',
+          result: entry.content ?? '',
           toolStatus: isError ? 'error' : 'success',
         });
       }
+      if (typeof entry.content === 'string') {
+        outputAtts.push(...parseOutputAttachments(entry.content));
+      }
+    }
+    // tool_call_start / interrupt are transient — skip in history.
+  }
+
+  // 未答的 ask_clarification/confirm_workflow（tool_call 无 tool_result）→ 中断态。
+  for (const e of timeline) {
+    if (
+      e.type === 'tool' &&
+      (e.toolName === 'ask_clarification' || e.toolName === 'confirm_workflow') &&
+      !e.result
+    ) {
+      isInterrupted = true;
+      break;
     }
   }
-  // 收集所有 tool_result/tool 产物里解析出的 output 文件路径，挂到最终回复消息上
-  // （agent 产出文件不在 MessageRecord.files 里，只能从工具结果文本解析）。
-  const outputAtts: ChatAttachment[] = [];
-  for (const entry of rec.timeline_entries ?? []) {
-    if ((entry.type === 'tool_result' || entry.type === 'tool') && typeof entry.content === 'string') {
-      outputAtts.push(...parseOutputAttachments(entry.content));
-    }
-  }
-  // 去重（同一文件可能被多个工具结果提及）
+
   const dedupOutput = outputAtts.filter(
     (a, i, arr) => arr.findIndex((b) => b.ref === a.ref) === i,
   );
 
-  // 最终回复正文：优先取 timeline 的 text 条目（aba1d62 后的存储方式），
-  // 旧消息仍带 content 字段时回退使用。
-  const textContent =
-    textParts.join('\n\n').trim() ||
-    (rec.content && rec.content.trim() ? rec.content : '');
-  if (textContent) {
-    out.push({
-      id: rec._id,
-      senderName: agentName,
-      avatar,
-      role: 'agent',
-      content: textContent,
-      timestamp: new Date(rec.created_at).toLocaleString(),
-      attachment: fileRefToAttachment(rec.files?.[0]),
-      attachments: dedupOutput.length > 0 ? dedupOutput : undefined,
-      usage: rec.token_usage,
-    });
-  } else if (dedupOutput.length > 0) {
-    // 没有最终文本但有产物文件：仍渲染一个携带附件的气泡
-    out.push({
-      id: rec._id,
-      senderName: agentName,
-      avatar,
-      role: 'agent',
-      content: '',
-      timestamp: new Date(rec.created_at).toLocaleString(),
-      attachments: dedupOutput,
-      usage: rec.token_usage,
-    });
-  }
-  return out.length
-    ? out
-    : [
-        {
-          id: rec._id,
-          senderName: agentName,
-          avatar,
-          role: 'agent',
-          content: rec.content || '(空回复)',
-          timestamp: new Date(rec.created_at).toLocaleString(),
-        },
-      ];
+  return {
+    id: rec._id,
+    senderName: agentName,
+    avatar,
+    role: 'agent',
+    content: '',
+    timestamp: new Date(rec.created_at).toLocaleString(),
+    timeline: timeline.length > 0 ? timeline : undefined,
+    isInterrupted,
+    attachment: fileRefToAttachment(rec.files?.[0]),
+    attachments: dedupOutput.length > 0 ? dedupOutput : undefined,
+    usage: rec.token_usage,
+  };
 }
 
 function fileRefToAttachment(file?: FileRef): Message['attachment'] | undefined {
@@ -504,6 +489,67 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const filesPanelRef = useRef<SessionFilesPanelHandle>(null);
+  // ask_clarification / confirm_workflow 中断态：SSE 收到 interrupt 或历史回填时
+  // 记录对应的消息 id，使下一次发送走 /resume 而非 /stream（避免 agent 重复提问）。
+  const pendingInterruptRef = useRef<{ toolMsgId: string } | null>(null);
+
+  // ── Timeline 流式渲染 refs（对齐 frontend chat-panel 的 RAF 批处理）──
+  // 每个 text_delta 只进 buffer，一帧最多 setState 一次，保证平滑且多轮
+  // text→tool→text 顺序正确（tool_call_start 重置 textEntryIdRef 让新轮 text
+  // 开新 entry）。
+  const deltaBufferRef = useRef<{ agentMsgId: string; delta: string } | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+  const textEntryIdRef = useRef<string | null>(null);
+  const textStartedRef = useRef(false);
+
+  /** 把累积的 delta flush 进 agent 消息的 timeline（追加到当前 text entry 或新建）。 */
+  const flushDelta = useCallback(() => {
+    rafIdRef.current = null;
+    const buf = deltaBufferRef.current;
+    if (!buf) return;
+    deltaBufferRef.current = null;
+    const { agentMsgId, delta } = buf;
+    setLiveMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== agentMsgId) return m;
+        const tl = [...(m.timeline ?? [])];
+        const existingId = textEntryIdRef.current;
+        if (
+          existingId &&
+          tl.length > 0 &&
+          tl[tl.length - 1].id === existingId &&
+          tl[tl.length - 1].type === 'text'
+        ) {
+          // 快路径：ref 命中末尾 text entry，直接追加。
+          tl[tl.length - 1] = { ...tl[tl.length - 1], content: tl[tl.length - 1].content + delta };
+        } else if (textStartedRef.current && tl.length > 0 && tl[tl.length - 1].type === 'text') {
+          // 同一 LLM 输出阶段（无 tool_call 介入），合并进末尾 text entry。
+          const lastIdx = tl.length - 1;
+          tl[lastIdx] = { ...tl[lastIdx], content: tl[lastIdx].content + delta };
+          textEntryIdRef.current = tl[lastIdx].id;
+        } else {
+          // 新文本块（首个 delta，或 tool_call 之后）：push 新 entry。
+          const newId = `${agentMsgId}-text-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          tl.push({ id: newId, type: 'text', content: delta });
+          textEntryIdRef.current = newId;
+          textStartedRef.current = true;
+        }
+        return { ...m, timeline: tl };
+      }),
+    );
+    messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  /** 累积 text_delta 进 buffer，调度 RAF flush（一帧一次）。 */
+  const appendDelta = useCallback(
+    (agentMsgId: string, delta: string) => {
+      const prev = deltaBufferRef.current;
+      if (prev && prev.agentMsgId === agentMsgId) prev.delta += delta;
+      else deltaBufferRef.current = { agentMsgId, delta };
+      if (!rafIdRef.current) rafIdRef.current = requestAnimationFrame(flushDelta);
+    },
+    [flushDelta],
+  );
 
   const activeSession = sessions.find((s) => s._id === activeSessionId) ?? null;
   const activeAgent =
@@ -535,15 +581,15 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
           else {
             const agent = agents.find((a) => a.id === detail.session.agent_id);
             mapped.push(
-              ...agentMessageToDisplay(
-                rec,
-                agent?.name ?? 'Agent',
-                agent?.avatar ?? '🤖',
-              ),
+              agentMessageToDisplay(rec, agent?.name ?? 'Agent', agent?.avatar ?? '🤖'),
             );
           }
         }
         setLiveMessages(mapped);
+        // 检测未答的 interrupt（ask_clarification/confirm_workflow）：页面跳转后
+        // SSE 中断导致 pendingInterruptRef 丢失，从历史恢复，使下次发送走 /resume。
+        const pending = [...mapped].reverse().find((m) => m.isInterrupted);
+        if (pending) pendingInterruptRef.current = { toolMsgId: pending.id };
       })
       .catch((e) => {
         if (!cancelled) setStreamError(`加载会话失败：${(e as Error).message}`);
@@ -597,12 +643,13 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
   };
 
   /** Send a message and consume the SSE stream into liveMessages. */
-  const handleSendMessage = async (e?: FormEvent) => {
+  const handleSendMessage = async (e?: FormEvent, overrideText?: string) => {
     e?.preventDefault();
     const sessionId = activeSessionId;
     const agent = activeAgent;
     // Allow send with text only OR files only (matches legacy chat-panel.tsx).
-    const prompt = inputText.trim();
+    // overrideText 来自 ask_clarification 卡片的选项/内联回答（走 /resume）。
+    const prompt = (overrideText ?? inputText).trim();
     if ((!prompt && pendingFiles.length === 0) || !sessionId || !agent || isStreaming) return;
 
     setInputText('');
@@ -675,25 +722,75 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
       content: '',
       timestamp: '刚刚',
       status: 'thinking',
+      timeline: [],
     };
+    // 重置 timeline 流式追踪 refs（让首轮 text 开新 entry）。
+    textEntryIdRef.current = null;
+    textStartedRef.current = false;
+    deltaBufferRef.current = null;
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
 
-    setLiveMessages((prev) => [...prev, userMsg, agentMsg]);
+    // ── 是否走 /resume：pendingInterruptRef 已设置（SSE interrupt）或存在等待中的
+    // ask_clarification/confirm_workflow（页面跳转后从历史恢复）。回答注入对应卡片
+    // 作为结果，不再单独渲染用户气泡；下次走 resume 让 agent 继续而非重复提问。
+    const resumeMsgId =
+      pendingInterruptRef.current?.toolMsgId ??
+      [...liveMessages].reverse().find((m) => m.isInterrupted)?.id;
+    const isResume = !!resumeMsgId;
+
+    setLiveMessages((prev) => {
+      if (isResume && resumeMsgId) {
+        // 回答作为旧中断卡片的 timeline tool entry 的 result，关闭中断态；
+        // 不渲染独立用户气泡。
+        return prev
+          .map((m) => {
+            if (m.id !== resumeMsgId) return m;
+            // 把 timeline 里第一个未答的 tool entry 填上用户回答。
+            let answered = false;
+            const tl = (m.timeline ?? []).map((e) => {
+              if (
+                !answered &&
+                e.type === 'tool' &&
+                (e.toolName === 'ask_clarification' || e.toolName === 'confirm_workflow') &&
+                !e.result
+              ) {
+                answered = true;
+                return { ...e, result: prompt, toolStatus: 'success' as const };
+              }
+              return e;
+            });
+            return { ...m, isInterrupted: false, timeline: tl };
+          })
+          .concat(agentMsg);
+      }
+      return [...prev, userMsg, agentMsg];
+    });
+    pendingInterruptRef.current = null;
     setIsStreaming(true);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
-      const res = await agentApi.stream(agent.id, {
-        input: prompt,
-        session_id: sessionId,
-        enable_thinking: enableThinking,
-        // file_ids: persists the reference on the user message (history).
-        // file_paths: backend embeds file contents into the LLM user message
-        // (agents.py:589-610) — without this the agent never sees the content.
-        file_ids: uploadedFileIds.length > 0 ? uploadedFileIds : undefined,
-        file_paths: uploadedPaths.length > 0 ? uploadedPaths : undefined,
-      });
+      const res = isResume
+        ? await agentApi.resume(agent.id, {
+            session_id: sessionId,
+            answer: prompt,
+            enable_thinking: enableThinking,
+          })
+        : await agentApi.stream(agent.id, {
+            input: prompt,
+            session_id: sessionId,
+            enable_thinking: enableThinking,
+            // file_ids: persists the reference on the user message (history).
+            // file_paths: backend embeds file contents into the LLM user message
+            // (agents.py:589-610) — without this the agent never sees the content.
+            file_ids: uploadedFileIds.length > 0 ? uploadedFileIds : undefined,
+            file_paths: uploadedPaths.length > 0 ? uploadedPaths : undefined,
+          });
       // Attachments already handed off to the execution request above
       // (pendingFiles cleared earlier in this function).
       if (!res.ok) {
@@ -707,13 +804,10 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
         throw new Error(detail);
       }
 
-      let finalText = '';
-      let thinkingText = '';
-      // Tracks the live message id of the most recent tool_call card so the
-      // matching tool_result can merge into it (running → success/error).
-      let pendingToolMsgId: string | null = null;
-      // 累积流式过程中 agent 产出的 output 文件路径，挂到 agent 气泡上内联预览。
+      // 累积流式过程中 agent 产出的 output 文件路径，挂到 agent 消息上内联预览。
       const streamedAttachments: ChatAttachment[] = [];
+      // 累积 thinking 文本（thinking_delta 逐步到达），写进 timeline thinking entry。
+      let thinkingText = '';
 
       for await (const evt of parseSSEStream(res)) {
         if (controller.signal.aborted) break;
@@ -725,55 +819,110 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
           // and reload generated files so any new outputs appear immediately.
           refreshSessions();
           filesPanelRef.current?.refresh();
-          // Attach token usage from the done event onto the agent bubble.
-          if (evt.usage) {
-            setLiveMessages((prev) => updateMsg(prev, agentMsgId, { usage: evt.usage }));
-          }
+          // 收敛残留 pending/running 的 tool entry 为 success（跳过 ask_clarification/
+          // confirm_workflow —— 它们 interrupt 等待用户），并挂 usage。
+          setLiveMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== agentMsgId) return m;
+              const tl = (m.timeline ?? []).map((e) =>
+                e.type === 'tool' &&
+                (e.toolStatus === 'pending' || e.toolStatus === 'running') &&
+                e.toolName !== 'ask_clarification' &&
+                e.toolName !== 'confirm_workflow' &&
+                e.toolName !== ''
+                  ? { ...e, toolStatus: 'success' as const }
+                  : e,
+              );
+              return { ...m, status: undefined, timeline: tl, usage: evt.usage ?? m.usage };
+            }),
+          );
           continue;
         }
         switch (evt.type) {
           case 'thinking':
-          case 'thinking_delta':
+          case 'thinking_delta': {
             thinkingText += evt.content;
+            const text = thinkingText;
             setLiveMessages((prev) =>
-              updateMsg(prev, agentMsgId, { status: 'thinking', content: thinkingText }),
+              prev.map((m) => {
+                if (m.id !== agentMsgId) return m;
+                const tl = [...(m.timeline ?? [])];
+                // 更新最后一个 thinking entry，没有就 push。
+                const lastIdx = tl.length - 1;
+                if (lastIdx >= 0 && tl[lastIdx].type === 'thinking') {
+                  tl[lastIdx] = { ...tl[lastIdx], content: text };
+                } else {
+                  tl.push({ id: `${agentMsgId}-think`, type: 'thinking', content: text });
+                }
+                return { ...m, status: 'thinking', timeline: tl };
+              }),
             );
             break;
-          case 'tool_call_start':
-            // Mark the agent bubble as "working" while tool args generate.
+          }
+          case 'tool_call_start': {
+            // 先同步 flush 文本 buffer（让 text 出现在 tool 之前），再 push 一个
+            // pending tool entry，并重置 text refs（让 tool 之后的新 text 开新 entry）。
+            if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+            const buf = deltaBufferRef.current;
+            deltaBufferRef.current = null;
+            rafIdRef.current = null;
+            textEntryIdRef.current = null;
+            textStartedRef.current = false;
+            // tool_call_start 不带 tool_name（名字在后续 tool_call 事件里），
+            // 先 push 一个 pending entry（toolName 空），tool_call 到达时补全。
+            const toolName = '';
+            const toolEntryId = `${agentMsgId}-tool-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
             setLiveMessages((prev) =>
-              updateMsg(prev, agentMsgId, { status: 'thinking', content: thinkingText || '…' }),
+              prev.map((m) => {
+                if (m.id !== agentMsgId) return m;
+                const tl = [...(m.timeline ?? [])];
+                if (buf) tl.push({ id: `${agentMsgId}-text-${Date.now()}`, type: 'text', content: buf.delta });
+                tl.push({ id: toolEntryId, type: 'tool', content: '', toolName, toolStatus: 'pending' });
+                return { ...m, status: undefined, timeline: tl };
+              }),
             );
             break;
+          }
           case 'tool_call': {
-            // Push a dedicated running tool card BEFORE the agent bubble so the
-            // tool activity shows up inline in the conversation trail.
-            const toolMsgId = `${agentMsgId}-tool-${Date.now()}`;
-            pendingToolMsgId = toolMsgId;
-            setLiveMessages((prev) => {
-              const idx = prev.findIndex((m) => m.id === agentMsgId);
-              const toolMsg: Message = {
-                id: toolMsgId,
-                senderName: agent.name,
-                avatar: agent.avatar,
-                role: 'agent',
-                agentId: agent.id,
-                content: '',
-                timestamp: '',
-                status: 'tool',
-                toolName: evt.tool_name,
-                toolArgs: evt.args,
-                toolStatus: 'running',
-              };
-              if (idx === -1) return [...prev, toolMsg];
-              return [...prev.slice(0, idx), toolMsg, ...prev.slice(idx)];
-            });
+            // 升级 pending tool entry 为 running（填入完整 args），没有就新建。
+            if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+            deltaBufferRef.current = null;
+            rafIdRef.current = null;
+            textEntryIdRef.current = null;
+            textStartedRef.current = false;
+            setLiveMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== agentMsgId) return m;
+                const tl = [...(m.timeline ?? [])];
+                const targetIdx = tl.findIndex(
+                  (e) => e.type === 'tool' && e.toolStatus === 'pending',
+                );
+                if (targetIdx >= 0) {
+                  tl[targetIdx] = {
+                    ...tl[targetIdx],
+                    toolName: evt.tool_name,
+                    args: evt.args,
+                    toolStatus: 'running',
+                  };
+                } else {
+                  tl.push({
+                    id: `${agentMsgId}-tool-${Date.now()}`,
+                    type: 'tool',
+                    content: '',
+                    toolName: evt.tool_name,
+                    args: evt.args,
+                    toolStatus: 'running',
+                  });
+                }
+                return { ...m, timeline: tl };
+              }),
+            );
             break;
           }
           case 'tool_result': {
             const resultContent = evt.content;
-            const isError = /\b(error|fail)/i.test(resultContent);
-            // 解析工具结果里产出的 output 文件，累积到 agent 气泡（去重）
+            const isError = evt.status === 'error';
+            // 解析工具结果里产出的 output 文件，累积到 agent 消息（去重）。
             const newAtts = parseOutputAttachments(resultContent);
             if (newAtts.length > 0) {
               for (const a of newAtts) {
@@ -781,74 +930,128 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
                   streamedAttachments.push(a);
                 }
               }
-              setLiveMessages((prev) =>
-                updateMsg(prev, agentMsgId, { attachments: [...streamedAttachments] }),
-              );
             }
-            // Merge into the pending tool card if present; otherwise push a
-            // standalone completed card.
-            if (pendingToolMsgId) {
-              const targetId = pendingToolMsgId;
-              setLiveMessages((prev) =>
-                updateMsg(prev, targetId, {
-                  toolResult: resultContent,
-                  toolStatus: isError ? 'error' : 'success',
-                }),
-              );
-              pendingToolMsgId = null;
-            } else {
-              const toolMsgId = `${agentMsgId}-tool-${Date.now()}`;
-              setLiveMessages((prev) => {
-                const idx = prev.findIndex((m) => m.id === agentMsgId);
-                const toolMsg: Message = {
-                  id: toolMsgId,
-                  senderName: agent.name,
-                  avatar: agent.avatar,
-                  role: 'agent',
-                  agentId: agent.id,
-                  content: '',
-                  timestamp: '',
-                  status: 'tool',
-                  toolName: evt.tool_name,
-                  toolResult: resultContent,
-                  toolStatus: isError ? 'error' : 'success',
+            setLiveMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== agentMsgId) return m;
+                const tl = [...(m.timeline ?? [])];
+                // 从后往前找匹配的 running tool entry，填入 result + 状态。
+                for (let i = tl.length - 1; i >= 0; i--) {
+                  if (
+                    tl[i].type === 'tool' &&
+                    tl[i].toolName === evt.tool_name &&
+                    tl[i].toolStatus === 'running'
+                  ) {
+                    tl[i] = {
+                      ...tl[i],
+                      result: resultContent,
+                      toolStatus: isError ? 'error' : 'success',
+                    };
+                    break;
+                  }
+                }
+                return {
+                  ...m,
+                  timeline: tl,
+                  attachments: streamedAttachments.length > 0 ? [...streamedAttachments] : m.attachments,
                 };
-                if (idx === -1) return [...prev, toolMsg];
-                return [...prev.slice(0, idx), toolMsg, ...prev.slice(idx)];
-              });
-            }
+              }),
+            );
             break;
           }
           case 'text_delta':
-            finalText += evt.content;
+            // 走 RAF 批处理（appendDelta/flushDelta），平滑且多轮顺序正确。
+            appendDelta(agentMsgId, evt.content);
             setLiveMessages((prev) =>
-              updateMsg(prev, agentMsgId, { status: undefined, content: finalText }),
+              prev.map((m) => (m.id === agentMsgId ? { ...m, status: undefined } : m)),
             );
             break;
-          case 'text':
-            finalText = evt.content;
+          case 'text': {
+            // 权威全文：覆盖最后一个 text entry，没有就 push。
+            const content = evt.content;
+            if (content) {
+              if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+              deltaBufferRef.current = null;
+              rafIdRef.current = null;
+              setLiveMessages((prev) =>
+                prev.map((m) => {
+                  if (m.id !== agentMsgId) return m;
+                  const tl = [...(m.timeline ?? [])];
+                  let found = false;
+                  for (let i = tl.length - 1; i >= 0; i--) {
+                    if (tl[i].type === 'text') {
+                      tl[i] = { ...tl[i], content };
+                      found = true;
+                      break;
+                    }
+                  }
+                  if (!found) tl.push({ id: `${agentMsgId}-text-${Date.now()}`, type: 'text', content });
+                  return { ...m, status: undefined, timeline: tl };
+                }),
+              );
+            }
+            break;
+          }
+          case 'error': {
+            // 不 throw 中断流：把错误记录到 agent 消息 timeline 的 error entry。
+            // 错误可能来自中途（如某个工具的加载失败），后续仍可能有事件。
+            const errContent = evt.content || '执行出错';
+            setStreamError(errContent);
             setLiveMessages((prev) =>
-              updateMsg(prev, agentMsgId, { status: undefined, content: finalText }),
+              prev.map((m) => {
+                if (m.id !== agentMsgId) return m;
+                const tl = [...(m.timeline ?? [])];
+                tl.push({ id: `${agentMsgId}-err-${Date.now()}`, type: 'error', content: `❌ ${errContent}` });
+                return { ...m, status: 'error', timeline: tl };
+              }),
             );
             break;
-          case 'error':
-            throw new Error(evt.content);
+          }
+          case 'interrupt': {
+            // Agent 经 ask_clarification/confirm_workflow 暂停等待用户回答：
+            // 标记该消息为中断态（卡片可交互），记录消息 id 使下次发送走 /resume。
+            setLiveMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== agentMsgId) return m;
+                // 把最后一个未答的 ask_clarification/confirm_workflow tool entry
+                // 标为 success（卡片就绪可交互）。
+                const tl = [...(m.timeline ?? [])];
+                for (let i = tl.length - 1; i >= 0; i--) {
+                  if (
+                    tl[i].type === 'tool' &&
+                    (tl[i].toolName === 'ask_clarification' || tl[i].toolName === 'confirm_workflow') &&
+                    !tl[i].result
+                  ) {
+                    tl[i] = { ...tl[i], toolStatus: 'success' };
+                    break;
+                  }
+                }
+                return { ...m, isInterrupted: true, timeline: tl };
+              }),
+            );
+            pendingInterruptRef.current = { toolMsgId: agentMsgId };
+            break;
+          }
           default:
             break;
         }
       }
-      // If the stream ended without a text block, show whatever accumulated.
-      setLiveMessages((prev) =>
-        updateMsg(prev, agentMsgId, {
-          status: undefined,
-          content: finalText || thinkingText || '(无回复内容)',
-        }),
-      );
+      // 兜底 flush 残留 delta。
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      if (deltaBufferRef.current) flushDelta();
     } catch (err) {
       const msg = (err as Error).message || '流式请求失败';
       setStreamError(msg);
       setLiveMessages((prev) =>
-        updateMsg(prev, agentMsgId, { status: 'error', content: `❌ ${msg}` }),
+        prev.map((m) => {
+          if (m.id !== agentMsgId) return m;
+          const tl = [...(m.timeline ?? [])];
+          tl.push({ id: `${agentMsgId}-err-${Date.now()}`, type: 'error', content: `❌ ${msg}` });
+          return { ...m, status: 'error', timeline: tl };
+        }),
       );
     } finally {
       setIsStreaming(false);
@@ -1043,8 +1246,10 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
 
           {liveMessages.map((msg) => {
             const isUser = msg.role === 'user';
-            const isThinking = msg.status === 'thinking';
-            const isTool = msg.status === 'tool';
+            const isAgent = msg.role === 'agent';
+            // agent 消息靠 timeline 渲染（text/tool/thinking/error 按顺序）；
+            // user 消息保持单个气泡。
+            const hasTimeline = isAgent && !!msg.timeline && msg.timeline.length > 0;
             return (
               <div
                 key={msg.id}
@@ -1066,8 +1271,7 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
                     {!isUser && (
                       <span className="font-bold text-[#a1a1aa] font-sans">
                         {msg.senderName}
-                        {isThinking && <span className="text-indigo-400 ml-1">· 思考中</span>}
-                        {isTool && <span className="text-amber-400 ml-1">· 工具调用</span>}
+                        {msg.status === 'thinking' && <span className="text-indigo-400 ml-1">· 思考中</span>}
                       </span>
                     )}
                     <span className="text-[#71717a] font-mono">{msg.timestamp}</span>
@@ -1080,14 +1284,80 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
                       </span>
                     ) : null}
                   </div>
-                  {isTool ? (
-                    <div className="max-w-2xl">
-                      <ToolCallCard msg={msg} />
+                  {hasTimeline ? (
+                    <div className="space-y-2 max-w-2xl">
+                      {msg.timeline!.map((entry, idx) => {
+                        const isLast = idx === msg.timeline!.length - 1;
+                        if (entry.type === 'text') {
+                          return (
+                            <div
+                              key={entry.id}
+                              className="p-4 rounded-xl rounded-tl-none text-[12.5px] leading-relaxed border font-sans select-text shadow-sm bg-[#18181b] border-[#27272a] text-[#e4e4e7]"
+                            >
+                              <Markdown content={entry.content} />
+                              {/* agent 消息的产出附件挂在最后一个 text entry 后面 */}
+                              {isLast && msg.attachments && msg.attachments.length > 0 && (
+                                <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-current/10">
+                                  {msg.attachments.map((att, i) => (
+                                    <ChatAttachmentCard
+                                      key={`${msg.id}-att-${i}-${att.ref}`}
+                                      att={att}
+                                      sessionId={activeSessionId}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                        if (entry.type === 'thinking') {
+                          return (
+                            <ThinkingEntryCard
+                              key={entry.id}
+                              entry={entry}
+                              onToggle={() =>
+                                setLiveMessages((prev) =>
+                                  prev.map((m) =>
+                                    m.id === msg.id
+                                      ? {
+                                          ...m,
+                                          timeline: (m.timeline ?? []).map((e) =>
+                                            e.id === entry.id ? { ...e, expanded: !e.expanded } : e,
+                                          ),
+                                        }
+                                      : m,
+                                  ),
+                                )
+                              }
+                            />
+                          );
+                        }
+                        if (entry.type === 'error') {
+                          return (
+                            <div
+                              key={entry.id}
+                              className="p-4 rounded-xl rounded-tl-none text-[12.5px] leading-relaxed border font-sans shadow-sm bg-rose-950/20 border-rose-900/40 rounded-tl-none text-rose-300"
+                            >
+                              {entry.content}
+                            </div>
+                          );
+                        }
+                        // tool entry
+                        return (
+                          <ToolEntryCard
+                            key={entry.id}
+                            entry={entry}
+                            msgId={msg.id}
+                            interrupted={!!msg.isInterrupted}
+                            onAnswer={(a) => handleSendMessage(undefined, a)}
+                          />
+                        );
+                      })}
                     </div>
                   ) : (
                   <div
                     className={`p-4 rounded-xl text-[12.5px] leading-relaxed border font-sans select-text shadow-sm ${
-                      isThinking
+                      msg.status === 'thinking'
                         ? 'bg-indigo-950/20 border-indigo-900/40 rounded-tl-none text-indigo-300 italic'
                         : isUser
                           ? 'bg-[#4f46e5]/10 border-[#4f46e5]/30 rounded-tr-none text-[#fafafa]'
@@ -1096,10 +1366,8 @@ export function ChatHomepage({ agents: agentsProp, theme = 'dark' }: ChatHomepag
                   >
                     {msg.content
                       ? <Markdown content={msg.content} />
-                      : (isThinking ? '…' : '')}
-                    {/* 可预览附件挂在气泡内部（紧随正文，非独立一行）：
-                        图片缩略图直显，其余文件卡片，点击弹窗预览（复用 FilePreviewModal）。
-                        用户上传与 agent 产出共用 ChatAttachmentCard，source 决定取数路径。 */}
+                      : (msg.status === 'thinking' ? '…' : '')}
+                    {/* 可预览附件挂在气泡内部（紧随正文，非独立一行）。 */}
                     {msg.attachments && msg.attachments.length > 0 && (
                       <div className={`flex flex-wrap gap-2 mt-3 pt-3 border-t border-current/10 ${isUser ? 'justify-end' : ''}`}>
                         {msg.attachments.map((att, i) => (
@@ -1322,6 +1590,12 @@ const TOOL_STATUS_CFG: Record<
   NonNullable<Message['toolStatus']>,
   { wrap: string; hover: string; icon: string; label: string }
 > = {
+  pending: {
+    wrap: 'bg-amber-500/10 border-amber-500/30',
+    hover: 'hover:bg-amber-500/15',
+    icon: 'text-amber-400',
+    label: '正在生成参数',
+  },
   running: {
     wrap: 'bg-amber-500/10 border-amber-500/30',
     hover: 'hover:bg-amber-500/15',
@@ -1369,14 +1643,89 @@ function formatToolResult(raw?: string): { text: string; isJson: boolean } {
 
 const RESULT_COLLAPSE_THRESHOLD = 800;
 
-function ToolCallCard({ msg }: { msg: Message }) {
-  const status = msg.toolStatus ?? 'running';
+/** Thinking entry — collapsible reasoning card. */
+function ThinkingEntryCard({
+  entry,
+  onToggle,
+}: {
+  entry: TimelineEntry;
+  onToggle: () => void;
+}) {
+  const expanded = !!entry.expanded;
+  return (
+    <div className="rounded-lg border border-blue-100 bg-blue-50/50 overflow-hidden font-sans dark:border-indigo-900/40 dark:bg-indigo-950/20">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3 py-2 border-0 bg-transparent cursor-pointer text-left hover:bg-blue-50 dark:hover:bg-indigo-950/40 transition-colors"
+      >
+        <Brain className="text-indigo-400" size={13} />
+        <span className="text-xs font-medium text-indigo-300">思考过程</span>
+        <span className="text-[10px] text-indigo-400/60 ml-auto">{expanded ? '收起' : '展开'}</span>
+        <ChevronRight className={`w-3 h-3 text-indigo-400/60 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="px-3 pb-2 pt-2 text-xs text-indigo-300/80 whitespace-pre-wrap leading-relaxed border-t border-indigo-900/40 italic">
+          {entry.content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Tool entry card — renders a timeline tool entry. Dispatches to
+ *  ClarificationCard / WorkflowProposalCard / WorkflowTaskCard for known
+ *  tool types, else a generic collapsible tool card. Reads entry fields
+ *  (toolName/args/result/toolStatus) instead of flat message fields. */
+function ToolEntryCard({
+  entry,
+  msgId,
+  interrupted,
+  onAnswer,
+}: {
+  entry: TimelineEntry;
+  msgId: string;
+  interrupted: boolean;
+  onAnswer?: (answer: string) => void;
+}) {
+  // ask_clarification 走专门的交互卡片（按 clarification_type 分样式）。
+  if (entry.toolName === 'ask_clarification') {
+    return <ClarificationCard entry={entry} interrupted={interrupted} onAnswer={onAnswer} />;
+  }
+  // confirm_workflow：工作流确认卡片（从 tool_call args 渲染，tool_result 决定终态）。
+  if (entry.toolName === 'confirm_workflow') {
+    const args = entry.args ?? {};
+    const resultText = entry.result ?? '';
+    const isRejection = /取消|拒绝|cancel/i.test(resultText);
+    const forceAction = entry.result ? (isRejection ? 'rejected' : 'confirmed') : undefined;
+    return (
+      <WorkflowProposalCard
+        proposal={{
+          type: 'workflow_proposal',
+          workflow_name: String(args.workflow_name ?? ''),
+          workflow_description: String(args.description ?? ''),
+          input_preview: (args.params ?? {}) as Record<string, unknown>,
+        }}
+        forceAction={forceAction}
+        onConfirm={(wfName) => {
+          onAnswer?.(`确认执行 ${wfName}`);
+          return true;
+        }}
+      />
+    );
+  }
+  // dispatch_workflow：解析 task_created → 内嵌可展开 task 卡片。
+  if (entry.toolName === 'dispatch_workflow') {
+    const created = parseTaskCreated(entry.result);
+    if (created) return <WorkflowTaskCard created={created} />;
+  }
+  const status = entry.toolStatus ?? 'running';
   const cfg = TOOL_STATUS_CFG[status];
   const [expanded, setExpanded] = useState(false);
   const [resultExpanded, setResultExpanded] = useState(false);
 
-  const argsText = formatToolArgs(msg.toolArgs);
-  const result = formatToolResult(msg.toolResult);
+  const argsText = formatToolArgs(entry.args);
+  const result = formatToolResult(entry.result);
   const hasDetail = Boolean(argsText || result.text);
   const resultTooLong = result.text.length > RESULT_COLLAPSE_THRESHOLD;
   const shownResult =
@@ -1385,7 +1734,7 @@ function ToolCallCard({ msg }: { msg: Message }) {
       : result.text;
 
   const StatusIcon =
-    status === 'running' ? Loader2 : status === 'success' ? CheckCircle : AlertTriangle;
+    status === 'running' || status === 'pending' ? Loader2 : status === 'success' ? CheckCircle : AlertTriangle;
 
   return (
     <div className={`rounded-xl rounded-tl-none border overflow-hidden font-sans ${cfg.wrap}`}>
@@ -1398,11 +1747,11 @@ function ToolCallCard({ msg }: { msg: Message }) {
         }`}
       >
         <StatusIcon
-          className={`w-3.5 h-3.5 shrink-0 ${cfg.icon} ${status === 'running' ? 'animate-spin' : ''}`}
+          className={`w-3.5 h-3.5 shrink-0 ${cfg.icon} ${status === 'running' || status === 'pending' ? 'animate-spin' : ''}`}
         />
         <Wrench className={`w-3.5 h-3.5 shrink-0 ${cfg.icon}`} />
         <span className={`text-xs font-semibold truncate ${cfg.icon}`}>
-          {msg.toolName || 'unknown_tool'}
+          {entry.toolName || 'unknown_tool'}
         </span>
         <span className={`text-[10px] ${cfg.icon} opacity-70`}>{cfg.label}</span>
         {hasDetail && (
@@ -1450,6 +1799,202 @@ function ToolCallCard({ msg }: { msg: Message }) {
               )}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────
+   ClarificationCard — ask_clarification 交互卡片
+   按 clarification_type 分样式渲染问题 + 选项/按钮 + 内联输入。
+   交互态（!answered && clarificationActive）选项可点、内联可填；已回答后选项
+   静态高亮、答案以 indigo 气泡附在卡片下方。暗色配色用 Tailwind opacity token，
+   明暗主题通用。对照 frontend/src/components/chat-panel.tsx 的 ask_clarification 渲染。
+   ──────────────────────────────────────────────────────────── */
+function ClarificationCard({
+  entry,
+  interrupted,
+  onAnswer,
+}: {
+  entry: TimelineEntry;
+  interrupted: boolean;
+  onAnswer?: (answer: string) => void;
+}) {
+  const args = entry.args ?? {};
+  const question = args.question ? String(args.question) : '';
+  // LLM 可能把 options 传成 JSON 字符串，做一次兼容解析。
+  const rawOptions = args.options;
+  let options: string[] = [];
+  if (Array.isArray(rawOptions)) options = rawOptions as string[];
+  else if (typeof rawOptions === 'string') {
+    try {
+      options = JSON.parse(rawOptions);
+    } catch {
+      /* ignore */
+    }
+  }
+  const clarificationType = args.clarification_type
+    ? String(args.clarification_type)
+    : 'missing_info';
+  const answered = !!entry.result;
+  // 交互态：未回答 + 消息处于中断态（interrupt 挂起中，或历史回填恢复的中断）。
+  const interactive = !answered && interrupted;
+
+  // fields 向导模式：ask_clarification 带 fields 时渲染多步结构化表单，
+  // 单次收集多个字段。fields 可能是数组或 JSON 字符串（LLM 容错）。
+  const rawFields = args.fields;
+  let formFields: ClarificationField[] = [];
+  if (Array.isArray(rawFields)) formFields = rawFields as ClarificationField[];
+  else if (typeof rawFields === 'string') {
+    try {
+      const parsed = JSON.parse(rawFields);
+      if (Array.isArray(parsed)) formFields = parsed as ClarificationField[];
+    } catch {
+      /* ignore */
+    }
+  }
+  if (formFields.length > 0) {
+    return (
+      <ClarificationFormCard
+        question={question}
+        context={args.context ? String(args.context) : undefined}
+        fields={formFields}
+        answered={answered}
+        result={entry.result}
+        onSubmit={(jsonStr) => onAnswer?.(jsonStr)}
+      />
+    );
+  }
+
+  const [inlineText, setInlineText] = useState('');
+  const submitInline = () => {
+    const t = inlineText.trim();
+    if (!t) return;
+    onAnswer?.(t);
+    setInlineText('');
+  };
+
+  const isRisk = clarificationType === 'risk_confirmation';
+  const isSuggestion = clarificationType === 'suggestion';
+  const verticalOptions =
+    clarificationType === 'approach_choice' || clarificationType === 'ambiguous_requirement';
+
+  const palette = isRisk
+    ? { wrap: 'bg-amber-500/10 border-amber-500/30', q: 'text-amber-200', icon: '⚠️' }
+    : isSuggestion
+      ? { wrap: 'bg-emerald-500/10 border-emerald-500/30', q: 'text-emerald-200', icon: '💡' }
+      : { wrap: 'bg-indigo-500/10 border-indigo-500/30', q: 'text-indigo-200', icon: '❓' };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className={`rounded-xl rounded-tl-none border px-4 py-3 font-sans ${palette.wrap}`}>
+        <div className="flex items-start gap-2.5">
+          <span className="text-sm mt-0.5 select-none">{palette.icon}</span>
+          <div className="flex-1 min-w-0">
+            <div className={`text-[13px] whitespace-pre-wrap leading-relaxed ${palette.q}`}>
+              {question}
+            </div>
+
+            {options.length > 0 && (
+              <div className={`flex gap-2 mt-3 ${verticalOptions ? 'flex-col' : 'flex-wrap'}`}>
+                {options.map((opt, i) =>
+                  interactive ? (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => onAnswer?.(opt)}
+                      className="text-left px-3 py-1.5 rounded-lg text-xs border bg-[#121214] border-[#27272a] text-slate-200 hover:border-indigo-500/50 hover:bg-indigo-500/10 transition cursor-pointer"
+                    >
+                      {opt}
+                    </button>
+                  ) : (
+                    <div
+                      key={i}
+                      className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                        entry.result === opt
+                          ? 'bg-indigo-500/15 border-indigo-500/50 text-indigo-200 font-medium'
+                          : 'bg-[#121214]/60 border-[#27272a] text-[#71717a]'
+                      }`}
+                    >
+                      {opt}
+                      {entry.result === opt && <span className="ml-1.5 text-indigo-400">✓</span>}
+                    </div>
+                  ),
+                )}
+              </div>
+            )}
+
+            {/* risk_confirmation：确认执行 / 取消 */}
+            {interactive && isRisk && (
+              <div className="flex gap-2 mt-3">
+                <button
+                  type="button"
+                  onClick={() => onAnswer?.('确认')}
+                  className="px-3.5 py-1.5 rounded-lg text-xs bg-rose-600 text-white hover:bg-rose-500 transition cursor-pointer"
+                >
+                  确认执行
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAnswer?.('取消')}
+                  className="px-3.5 py-1.5 rounded-lg text-xs bg-[#121214] border border-[#27272a] text-slate-300 hover:bg-[#27272a] transition cursor-pointer"
+                >
+                  取消
+                </button>
+              </div>
+            )}
+
+            {/* suggestion：接受按钮 */}
+            {interactive && isSuggestion && (
+              <div className="flex gap-2 mt-3 items-center">
+                <button
+                  type="button"
+                  onClick={() => onAnswer?.('接受建议')}
+                  className="px-3.5 py-1.5 rounded-lg text-xs bg-emerald-600 text-white hover:bg-emerald-500 transition cursor-pointer"
+                >
+                  接受
+                </button>
+                <span className="text-[11px] text-[#71717a]">或输入其他回答</span>
+              </div>
+            )}
+
+            {/* 内联自由输入（交互态通用兜底） */}
+            {interactive && (
+              <div className="flex gap-1.5 mt-2.5">
+                <input
+                  type="text"
+                  value={inlineText}
+                  onChange={(e) => setInlineText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      submitInline();
+                    }
+                  }}
+                  placeholder="输入你的回答…"
+                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg text-xs border border-[#27272a] bg-[#121214] text-slate-200 placeholder:text-[#52525b] focus:outline-none focus:border-indigo-500/50"
+                />
+                <button
+                  type="button"
+                  onClick={submitInline}
+                  disabled={!inlineText.trim()}
+                  className="px-2.5 py-1.5 rounded-lg text-xs bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition cursor-pointer"
+                >
+                  发送
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 用户答案：indigo 右对齐气泡 */}
+      {answered && (
+        <div className="flex flex-row-reverse">
+          <div className="max-w-[75%] rounded-xl rounded-tr-sm px-3 py-2 text-[13px] leading-relaxed bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 whitespace-pre-wrap">
+            {entry.result}
+          </div>
         </div>
       )}
     </div>

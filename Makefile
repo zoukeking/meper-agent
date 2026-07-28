@@ -17,7 +17,7 @@ help:
 
 # Install all project dependencies
 install:
-	cd backend && uv sync && cd ../frontend && npm install
+	cd backend && uv sync && cd ../frontend && npm install && cd ../frontend-client && npm install
 
 # Start development environment (sandbox disabled, bash runs via subprocess)
 dev:
@@ -30,11 +30,12 @@ dev-sandbox: build-sandbox
 
 # Start all services locally in one terminal (Ctrl+C stops all)
 dev-local:
-	@echo "Starting local dev: FastAPI :8000 + Celery worker + Frontend :5173"
+	@echo "Starting local dev: FastAPI :8000 + Celery worker + Frontend :5173 + Client :3001"
 	@trap 'kill 0' EXIT; \
 	(cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --no-access-log) & \
 	(cd backend && uv run celery -A app.workers.celery_app worker --loglevel=info --concurrency=2) & \
 	(cd frontend && npm run dev) & \
+	(cd frontend-client && npm run dev) & \
 	wait
 
 # Run all tests
