@@ -291,6 +291,30 @@ class TestDownloadFile:
         assert 'attachment; filename="test.txt"' in resp.headers["content-disposition"]
         app.dependency_overrides.clear()
 
+    def test_download_chinese_filename(self, client: TestClient, auth_admin):
+        """中文文件名下载不应 500(回归 UnicodeEncodeError, request_id cc150f95)。"""
+        from urllib.parse import unquote
+
+        from app.api.v1.files import get_file_service
+
+        fake_ref = _fake_file_ref(name="admin出差申请单.txt")
+        mock_svc = AsyncMock()
+        mock_svc.get = AsyncMock(return_value=fake_ref)
+        mock_svc._storage = AsyncMock()
+        mock_svc._storage.load = AsyncMock(return_value=b"file content")
+        app.dependency_overrides[get_file_service] = lambda: mock_svc
+
+        resp = client.get("/api/v1/files/file_01HTEST/download")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.content == b"file content"
+        cd = resp.headers["content-disposition"]
+        # 必须给出 RFC 5987 的 filename*,且能还原原始中文文件名
+        assert "filename*=UTF-8''" in cd
+        encoded = cd.split("filename*=UTF-8''", 1)[1]
+        assert unquote(encoded, encoding="utf-8") == "admin出差申请单.txt"
+        app.dependency_overrides.clear()
+
     def test_download_not_found(self, client: TestClient, auth_admin):
         from app.api.v1.files import get_file_service
 
