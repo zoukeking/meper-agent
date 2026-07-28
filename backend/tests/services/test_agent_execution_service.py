@@ -5,7 +5,6 @@ resume top-level except blocks rely on to populate ErrorEvent.source.
 """
 from app.services.agent_execution_service import _classify_error_source
 
-
 # ── _classify_error_source ──────────────────────────────────────────────────
 
 

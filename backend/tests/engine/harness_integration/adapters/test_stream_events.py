@@ -11,8 +11,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import ToolMessage
-
 from app.engine.harness_integration.adapters.stream_events import (
     _build_interrupt_event,
     _extract_interrupt,
@@ -21,6 +19,7 @@ from app.engine.harness_integration.adapters.stream_events import (
     _StreamingAccumulator,
     stream_events_to_app_events,
 )
+from langchain_core.messages import ToolMessage
 
 # ---------------------------------------------------------------------------
 # Helpers — simulate LangGraph event shapes
