@@ -59,6 +59,7 @@ export function toStudioAgent(a: BackendAgent): Agent {
   const skillsFromMcp = (a.mcp_connection_ids ?? []).map((id) => `mcp:${id}`)
   const skillsFromBuiltin = (a.builtin_config ?? []).map((b) => `builtin:${b}`)
   const skillsFromWorkflows = (a.workflow_ids ?? []).map((id) => `workflow:${id}`)
+  const skillsFromKb = (a.knowledge_base_ids ?? []).map((id) => `kb:${id}`)
   return {
     id: a.id,
     name: a.name,
@@ -81,7 +82,7 @@ export function toStudioAgent(a: BackendAgent): Agent {
     systemPrompt: a.prompt_slots?.system ?? a.prompt_slots?.system_prompt ?? '',
     status: agentStatusToDisplay(a.status),
     iconColor: DEFAULT_AGENT_ICON_COLOR,
-    skills: [...skillsFromSkillIds, ...skillsFromMcp, ...skillsFromBuiltin, ...skillsFromWorkflows],
+    skills: [...skillsFromSkillIds, ...skillsFromMcp, ...skillsFromBuiltin, ...skillsFromWorkflows, ...skillsFromKb],
     lastActive: a.updated_at ? new Date(a.updated_at).toLocaleString() : '—',
     maxRetry: a.max_retry ?? 3,
     maxTokens: a.max_tokens ?? 0,
@@ -100,6 +101,7 @@ export function fromStudioAgent(a: Agent): {
   mcp_connection_ids?: string[]
   builtin_config?: string[]
   workflow_ids?: string[]
+  knowledge_base_ids?: string[]
   max_retry?: number
   max_tokens?: number
 } {
@@ -108,10 +110,12 @@ export function fromStudioAgent(a: Agent): {
   const mcp_connection_ids: string[] = []
   const builtin_config: string[] = []
   const workflow_ids: string[] = []
+  const knowledge_base_ids: string[] = []
   for (const s of a.skills ?? []) {
     if (s.startsWith('mcp:')) mcp_connection_ids.push(s.slice(4))
     else if (s.startsWith('builtin:')) builtin_config.push(s.slice(8))
     else if (s.startsWith('workflow:')) workflow_ids.push(s.slice(9))
+    else if (s.startsWith('kb:')) knowledge_base_ids.push(s.slice(3))
     else skill_ids.push(s)
   }
   return {
@@ -136,6 +140,7 @@ export function fromStudioAgent(a: Agent): {
     mcp_connection_ids,
     builtin_config,
     ...(workflow_ids.length ? { workflow_ids } : {}),
+    ...(knowledge_base_ids.length ? { knowledge_base_ids } : {}),
     max_retry: a.maxRetry ?? 3,
     max_tokens: a.maxTokens ?? 0,
   }

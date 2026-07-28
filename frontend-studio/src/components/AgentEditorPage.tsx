@@ -19,6 +19,7 @@ import { modelApi, modelKeys } from '../services/model-api';
 import { toolsApi, toolKeys, type BuiltinTool } from '../services/tools-api';
 import { mcpApi, mcpKeys } from '../services/mcp-api';
 import { workflowsApi, workflowKeys } from '../services/workflows-api';
+import { knowledgeApi, knowledgeKeys } from '../services/knowledge-api';
 import { toStudioAgent, fromStudioAgent } from '../services/adapters';
 import { Select, type SelectOptionGroup } from './ui';
 import { toast } from './ui/toast';
@@ -94,6 +95,11 @@ export function AgentEditorPage({
     queryFn: () => workflowsApi.list({ page: 1, page_size: 100 }),
   });
   const workflows = workflowsData?.items ?? [];
+  const { data: kbData } = useQuery({
+    queryKey: knowledgeKeys.list({ page: 1, page_size: 100 }),
+    queryFn: () => knowledgeApi.list({ page: 1, page_size: 100 }),
+  });
+  const knowledgeBases = kbData?.items ?? [];
 
   const updateM = useMutation({
     mutationFn: (input: AgentUpdateInput) => agentApi.update(agentId, input),
@@ -305,6 +311,11 @@ export function AgentEditorPage({
         <ToolGroup title="工作流 (Workflows)" hint={workflows.length === 0 ? '无工作流' : undefined}>
           {workflows.map((w) => (
             <ToolChip key={w.id} label={w.name} checked={form.skills.includes(`workflow:${w.id}`)} onToggle={() => set({ skills: toggleSkill(form.skills, `workflow:${w.id}`) })} />
+          ))}
+        </ToolGroup>
+        <ToolGroup title="知识库 (Knowledge Base)" hint={knowledgeBases.length === 0 ? '无知识库' : undefined}>
+          {knowledgeBases.map((kb) => (
+            <ToolChip key={`kb:${kb.id}`} label={kb.name} checked={form.skills.includes(`kb:${kb.id}`)} onToggle={() => set({ skills: toggleSkill(form.skills, `kb:${kb.id}`) })} />
           ))}
         </ToolGroup>
       </Section>

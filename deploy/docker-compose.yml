@@ -29,9 +29,11 @@ services:
       # Container-internal paths (backend uses these to access files)
       - WORKSPACES_CONTAINER_DIR=${WORKSPACES_CONTAINER_DIR:-/data/workspaces}
       - SKILLS_CONTAINER_DIR=${SKILLS_CONTAINER_DIR:-/data/skills}
+      - KB_CONTAINER_DIR=${KB_CONTAINER_DIR:-/data/knowledge_bases}
       # Host-side paths (passed to Docker daemon for sandbox bind mounts)
       - WORKSPACES_HOST_DIR=${WORKSPACES_HOST_DIR:-${HOME}/.agent-flow/workspaces}
       - SKILLS_HOST_DIR=${SKILLS_HOST_DIR:-${HOME}/.agent-flow/skills}
+      - KB_HOST_DIR=${KB_HOST_DIR:-${HOME}/.agent-flow/knowledge_bases}
       # Sandbox
       - SANDBOX_ENABLED=${SANDBOX_ENABLED:-true}
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-agent-sandbox:latest}
@@ -43,6 +45,7 @@ services:
       - ${WORKSPACES_HOST_DIR:-${HOME}/.agent-flow/workspaces}:${WORKSPACES_CONTAINER_DIR:-/data/workspaces}
       # Skills — mounted read-only into sandbox containers
       - ${SKILLS_HOST_DIR:-${HOME}/.agent-flow/skills}:${SKILLS_CONTAINER_DIR:-/data/skills}
+      - ${KB_HOST_DIR:-${HOME}/.agent-flow/knowledge_bases}:${KB_CONTAINER_DIR:-/data/knowledge_bases}
     depends_on:
       mongodb:
         condition: service_started
@@ -61,14 +64,17 @@ services:
     environment:
       - WORKSPACES_CONTAINER_DIR=${WORKSPACES_CONTAINER_DIR:-/data/workspaces}
       - SKILLS_CONTAINER_DIR=${SKILLS_CONTAINER_DIR:-/data/skills}
+      - KB_CONTAINER_DIR=${KB_CONTAINER_DIR:-/data/knowledge_bases}
       - WORKSPACES_HOST_DIR=${WORKSPACES_HOST_DIR:-${HOME}/.agent-flow/workspaces}
       - SKILLS_HOST_DIR=${SKILLS_HOST_DIR:-${HOME}/.agent-flow/skills}
+      - KB_HOST_DIR=${KB_HOST_DIR:-${HOME}/.agent-flow/knowledge_bases}
       - SANDBOX_ENABLED=${SANDBOX_ENABLED:-true}
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-agent-sandbox:latest}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${WORKSPACES_HOST_DIR:-${HOME}/.agent-flow/workspaces}:${WORKSPACES_CONTAINER_DIR:-/data/workspaces}
       - ${SKILLS_HOST_DIR:-${HOME}/.agent-flow/skills}:${SKILLS_CONTAINER_DIR:-/data/skills}
+      - ${KB_HOST_DIR:-${HOME}/.agent-flow/knowledge_bases}:${KB_CONTAINER_DIR:-/data/knowledge_bases}
     depends_on:
       - redis
       - mongodb

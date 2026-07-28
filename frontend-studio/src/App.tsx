@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  Bot, LayoutDashboard, Layers, Key, Server,
+  Bot, BookOpen, LayoutDashboard, Layers, Key, Server,
   Sun, Moon, MessageSquare, ListTodo, Sparkles, Shield,
   Wrench, Plug, UserCog, LogOut, ChevronDown,
   PanelLeftClose, PanelLeftOpen, Clock,
@@ -30,6 +30,8 @@ import { SkillsStore } from './components/SkillsStore';
 import { BuiltinToolsPage } from './components/BuiltinToolsPage';
 import { McpManagePage } from './components/McpManagePage';
 import { SkillDetailPage } from './components/SkillDetailPage';
+import { KnowledgeBasePage } from './components/KnowledgeBasePage';
+import { KbDetailPage } from './components/KbDetailPage';
 import { UserManagement } from './components/UserManagement';
 import { SystemSettings } from './components/SystemSettings';
 import { ModelsPage } from './components/ModelsPage';
@@ -68,6 +70,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'tools', label: '内置工具', icon: Wrench, permission: 'tool:read' },
   { id: 'mcp', label: '外部工具接入', icon: Plug, permission: 'tool:read' },
   { id: 'skills', label: '技能商店', icon: Sparkles, permission: 'tool:read' },
+  { id: 'knowledge', label: '知识库', icon: BookOpen, permission: 'knowledge:read' },
   { id: 'users', label: '用户权限', icon: Shield, permission: 'user:read' },
   { id: 'settings', label: '系统设置', icon: Key, permission: 'settings:manage' },
 ];
@@ -91,6 +94,8 @@ export default function App() {
     });
   // Sub-state for the Skill detail view (tools tab → open a Skill's files).
   const [openSkill, setOpenSkill] = useState<{ id: string; name: string } | null>(null);
+  // Sub-state for the Knowledge Base detail view (list → click card → files).
+  const [openKb, setOpenKb] = useState<{ id: string; name: string } | null>(null);
   // Sub-state for the workflow editor (list → click card → editor).
   const [openWorkflow, setOpenWorkflow] = useState<string | null>(null);
   // Sub-state for the Agent detail / live-test split view + editor.
@@ -535,6 +540,18 @@ export default function App() {
               />
             ) : (
               <SkillsStore onOpenSkill={(s) => setOpenSkill({ id: s.id, name: s.name })} />
+            )
+          )}
+
+          {activeTab === 'knowledge' && (
+            openKb ? (
+              <KbDetailPage
+                kbId={openKb.id}
+                kbName={openKb.name}
+                onBack={() => setOpenKb(null)}
+              />
+            ) : (
+              <KnowledgeBasePage onOpenKb={(kb) => setOpenKb({ id: kb.id, name: kb.name })} />
             )
           )}
 
