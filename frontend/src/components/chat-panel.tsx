@@ -439,15 +439,26 @@ export default function ChatPanel({
         const msgs = historyToMessages(detail.messages)
         setMessages(msgs)
 
-        // 检测是否有未回答的 ask_clarification（页面跳转后 SSE 中断导致
-        // pendingInterruptRef 丢失）。如果找到，恢复中断状态，使下一次发送
-        // 走 /resume 而非 /stream，避免 Agent 重复提出同样的问题。
-        const lastAgentMsg = [...msgs].reverse().find((m) => m.role === 'agent')
-        if (lastAgentMsg?.timeline) {
-          const hasUnanswered = lastAgentMsg.timeline.some(
-            (e) => e.type === 'tool' && e.toolName === 'ask_clarification' && !e.result,
+        // 检测是否有未回答的 interrupt（页面跳转后 SSE 中断导致
+        // pendingInterruptRef 丢失）。两种来源：
+        // 1. ask_clarification：timeline 里有未回答（!result）的 tool entry
+        // 2. confirm_workflow：timeline 里有 kind=workflow_confirmation 的
+        //    interrupt entry（payload 含 workflow_name 等）
+        // 任一找到都恢复中断状态，使下一次发送走 /resume 而非 /stream。
+        const lastAgentIdx = [...msgs].reverse().findIndex((m) => m.role === 'agent')
+        if (lastAgentIdx !== -1) {
+          const lastAgentMsg = msgs[msgs.length - 1 - lastAgentIdx]
+          // 未回答的 interrupt 工具（ask_clarification / confirm_workflow）：
+          // tool_call 落库了但没有对应的 tool_result（interrupt 还在挂起）。
+          // 恢复 pendingInterruptRef，使下一次发送走 /resume 而非 /stream。
+          // 卡片本身从 tool entry 的 args 渲染（见 TimelineEntryCard）。
+          const hasUnansweredInterrupt = lastAgentMsg.timeline?.some(
+            (e) =>
+              e.type === 'tool'
+              && (e.toolName === 'ask_clarification' || e.toolName === 'confirm_workflow')
+              && !e.result,
           )
-          if (hasUnanswered) {
+          if (hasUnansweredInterrupt) {
             pendingInterruptRef.current = { agentMsgId: lastAgentMsg.id }
             setMessages((prev) =>
               prev.map((m) => (m.id === lastAgentMsg.id ? { ...m, isInterrupted: true } : m)),
@@ -472,9 +483,14 @@ export default function ChatPanel({
 
   /* ─── SSE stream handler ─── */
 
-  const handleSend = useCallback(async (text?: string) => {
+  const handleSend = useCallback(async (text?: string): Promise<boolean> => {
     const content = text ?? input.trim()
-    if ((!content && pendingFiles.length === 0) || isStreaming) return
+    // Returns true if a request was actually dispatched, false if a guard
+    // (empty input, still streaming) suppressed the send. Callers driving UI
+    // confirmation cards (e.g. WorkflowProposalCard) await this to decide
+    // whether to flip to the "confirmed" state — otherwise a click during
+    // streaming silently no-ops while the card misleadingly shows "已确认".
+    if ((!content && pendingFiles.length === 0) || isStreaming) return false
 
     // Track the session ID to use — may be created here for file uploads
     let sid = currentSessionId
@@ -497,7 +513,7 @@ export default function ChatPanel({
         } catch {
           setIsUploading(false)
           message.error('创建会话失败')
-          return
+          return false
         }
       }
       let hasUploadError = false
@@ -531,7 +547,7 @@ export default function ChatPanel({
     }
 
     // Nothing to send (only files were uploaded, no text)
-    if (!content) return
+    if (!content) return false
 
     // 检测是否应该走 resume 路径:
     // 1. pendingInterruptRef 已设置（正常流程中 SSE 收到 interrupt 事件）
@@ -744,22 +760,43 @@ export default function ChatPanel({
                   ),
                 )
               } else if (eventType === 'interrupt') {
-                // Agent paused via ask_clarification — show question to user.
-                // The user's next message will be sent via /resume instead of /stream.
-                const evt = event as { question: string; clarification_type?: string; context?: string | null; options?: string[] | null }
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === agentMsgId
-                      ? {
-                          ...m,
-                          isInterrupted: true,
-                          interruptQuestion: evt.question,
-                          interruptOptions: evt.options ?? undefined,
-                          interruptContext: evt.context ?? undefined,
-                        }
-                      : m,
-                  ),
-                )
+                // Agent paused via interrupt() (ask_clarification or
+                // confirm_workflow). The user's next message goes to /resume.
+                const evt = event as {
+                  kind?: 'clarification' | 'workflow_confirmation'
+                  question?: string
+                  clarification_type?: string
+                  context?: string | null
+                  options?: string[] | null
+                  workflow_name?: string
+                  workflow_description?: string
+                  input_preview?: Record<string, unknown>
+                }
+                if (evt.kind === 'workflow_confirmation') {
+                  // confirm_workflow interrupt — the card is already rendered
+                  // from the tool_call entry (TimelineEntryCard). Here we only
+                  // mark the message interrupted so handleSend routes the next
+                  // send (the user's confirmation) to /resume.
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === agentMsgId ? { ...m, isInterrupted: true } : m,
+                    ),
+                  )
+                } else {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === agentMsgId
+                        ? {
+                            ...m,
+                            isInterrupted: true,
+                            interruptQuestion: evt.question ?? '',
+                            interruptOptions: evt.options ?? undefined,
+                            interruptContext: evt.context ?? undefined,
+                          }
+                        : m,
+                    ),
+                  )
+                }
                 pendingInterruptRef.current = { agentMsgId }
               } else if (eventType === 'tool_call_start') {
                 // Streaming: LLM started generating tool call args.
@@ -898,6 +935,8 @@ export default function ChatPanel({
         // Only scroll for non-delta events (tool_call, tool_result, etc.)
         // Delta scrolling is handled by flushDelta via RAF
       }
+      // Stream completed without throwing — request was dispatched successfully.
+      return true
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         setMessages((prev) =>
@@ -923,6 +962,7 @@ export default function ChatPanel({
           ),
         )
       }
+      return true
     } finally {
       // Flush any remaining buffered deltas
       if (rafIdRef.current) {
@@ -1550,7 +1590,7 @@ function TimelineEntryCard({
   entry: TimelineEntry
   msgId: string
   onToggle: (msgId: string, entryId: string) => void
-  onSendMessage?: (text: string) => void
+  onSendMessage?: (text: string) => Promise<boolean> | void
 }) {
   switch (entry.type) {
     case 'thinking':
@@ -1815,6 +1855,43 @@ function TimelineEntryCard({
         )
       }
 
+      // confirm_workflow: render a workflow confirmation card from the
+      // tool_call args (workflow_name/description/params) + tool_result
+      // (the user's confirmation text). Mirrors ask_clarification: when
+      // there's no result yet the card is interactive (interrupt is
+      // pending); once result arrives it shows the confirmed state. Both
+      // args and result are persisted, so the card survives page refresh.
+      if (entry.toolName === 'confirm_workflow') {
+        const wfName = entry.args?.workflow_name ? String(entry.args.workflow_name) : ''
+        const wfDesc = entry.args?.description ? String(entry.args.description) : ''
+        const wfParams = (entry.args?.params ?? {}) as Record<string, unknown>
+        const answered = !!entry.result
+        // The tool_result is the user's confirmation/rejection text. We do NOT
+        // render it as a user bubble — it's just the agent's interrupt answer.
+        // Derive confirmed vs rejected from the text so the card shows the
+        // right terminal state on history backfill.
+        const resultText = entry.result ? String(entry.result) : ''
+        const isRejection = /取消|拒绝|拒绝执行|cancel/i.test(resultText)
+        return (
+          <WorkflowProposalCard
+            proposal={
+              {
+                type: 'workflow_proposal',
+                workflow_name: wfName,
+                workflow_description: wfDesc,
+                input_preview: wfParams,
+              } as WorkflowProposal
+            }
+            /* When the interrupt is still pending (no result), the confirm
+               button sends the confirmation via onSendMessage (which routes
+               to /resume via pendingInterruptRef). Once answered, force the
+               card into its terminal confirmed/rejected display. */
+            forceAction={answered ? (isRejection ? 'rejected' : 'confirmed') : undefined}
+            onConfirm={(workflowName) => onSendMessage?.(`确认执行 ${workflowName}`)}
+          />
+        )
+      }
+
       const style = TOOL_STATUS_STYLE[status]
       const StatusIcon = style.icon
       const hasDetail = (entry.args && Object.keys(entry.args).length > 0) || entry.result
@@ -1897,7 +1974,7 @@ function ToolResultCardRenderer({
   onSendMessage,
 }: {
   result: string
-  onSendMessage?: (text: string) => void
+  onSendMessage?: (text: string) => Promise<boolean> | void
 }) {
   let parsed: Record<string, unknown> | null = null
   try {
@@ -1916,9 +1993,7 @@ function ToolResultCardRenderer({
       <div className="px-3 pb-2">
         <WorkflowProposalCard
           proposal={parsed as unknown as WorkflowProposal}
-          onConfirm={(workflowName) => {
-            onSendMessage?.(`确认执行 ${workflowName}`)
-          }}
+          onConfirm={(workflowName) => onSendMessage?.(`确认执行 ${workflowName}`)}
         />
       </div>
     )
