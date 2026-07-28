@@ -192,13 +192,23 @@ export interface ErrorEvent {
   source?: 'llm' | 'tool' | 'graph'
 }
 
-/** Agent paused via interrupt, awaiting user answer */
+/** Agent paused via interrupt, awaiting user answer.
+ *  kind discriminates clarification (ask_clarification) vs workflow
+ *  confirmation (confirm_workflow); the studio interrupt handler keys off
+ *  the tool_call's toolName rather than kind, but the fields are kept for
+ *  parity with the backend InterruptEvent. */
 export interface InterruptEvent {
   type: 'interrupt'
+  kind?: 'clarification' | 'workflow_confirmation'
+  // clarification fields (ask_clarification)
   question: string
   clarification_type: string
   context?: string | null
   options?: string[] | null
+  // workflow_confirmation fields (confirm_workflow)
+  workflow_name?: string
+  workflow_description?: string
+  input_preview?: Record<string, unknown>
   interrupt_id: string
 }
 
