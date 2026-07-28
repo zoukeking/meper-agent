@@ -282,56 +282,42 @@ async def update_task_variables(task_id: str, variables: str, version: int = 0) 
 
 
 # ---------------------------------------------------------------------------
-# Workflow proposal tool — shows a confirmation card to the user
+# Workflow confirmation tool — interrupts to ask the user to confirm
 # ---------------------------------------------------------------------------
 
 
 @tool
-async def propose_workflow(
+async def confirm_workflow(
     workflow_name: str,
+    description: str,
     params: ParamsDict = None,
 ) -> str:
-    """Propose a workflow to the user by showing a confirmation card.
+    """Ask the user to confirm executing a workflow. Execution pauses
+    (interrupt) and a confirmation card is shown; the tool returns once
+    the user confirms or rejects.
 
-    Looks up the workflow by name and returns structured info for the
-    frontend to render as a confirmation card.  Does NOT create a Task.
-
-    After calling this, just tell the user you found a suitable workflow
-    — the system will handle the rest.
-
-    Only call ``dispatch_workflow`` when the user explicitly confirms
-    (e.g. says '确认', '好的', '是的').
+    The agent already knows the workflow's name and description from the
+    system prompt, so pass them straight through — this tool does not
+    look anything up. Do NOT create a Task here; call ``dispatch_workflow``
+    only after the user confirms.
 
     Args:
-        workflow_name: The name or ID of the workflow to propose.
-        params: Input parameters to show in the proposal (optional).
+        workflow_name: Name of the workflow to confirm (from system prompt).
+        description: Short description of the workflow (from system prompt).
+        params: Input parameters being proposed for the workflow.
     """
-    from app.services.workflow_registry_service import WorkflowRegistryService
+    from langgraph.types import interrupt
 
-    try:
-        entry = await WorkflowRegistryService.get_by_name(workflow_name)
-        if entry is None:
-            entry = await WorkflowRegistryService.get_by_workflow_id(workflow_name)
-        if entry is None:
-            return _to_json({
-                "error": f"工作流 '{workflow_name}' 不存在",
-                "available_workflows": [],
-            })
-
-        return _to_json({
-            "type": "workflow_proposal",
-            "workflow_name": entry.get("name", workflow_name),
-            "workflow_description": entry.get("description", ""),
-            "input_preview": dict(params) if params else {},
-            "has_human_node": entry.get("has_human_node", False),
-        })
-    except Exception as exc:
-        logger.error(
-            "propose_workflow_error",
-            workflow_name=workflow_name,
-            error=str(exc),
-        )
-        return _to_json({"error": f"提议工作流失败: {exc}"})
+    payload = {
+        "type": "workflow_confirmation",
+        "workflow_name": workflow_name,
+        "workflow_description": description,
+        "input_preview": dict(params) if params else {},
+    }
+    # interrupt() suspends the graph; resume(Command(resume=answer)) returns
+    # the user's confirmation/rejection text, which we hand back to the LLM.
+    answer = interrupt(payload)
+    return answer if isinstance(answer, str) else str(answer)
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +420,7 @@ async def dispatch_workflow(
 # ---------------------------------------------------------------------------
 
 _TASK_TOOLS: list[BaseTool] = [
-    propose_workflow,
+    confirm_workflow,
     dispatch_workflow,
     task_query,
     task_intervene,

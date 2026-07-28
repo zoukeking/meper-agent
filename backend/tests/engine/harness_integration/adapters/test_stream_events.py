@@ -14,6 +14,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from app.engine.harness_integration.adapters.stream_events import (
+    _build_interrupt_event,
     _extract_interrupt,
     _extract_text_content,
     _extract_thinking_content,
@@ -435,8 +436,21 @@ class TestExtractInterrupt:
         result = _extract_interrupt(gi)
         assert result == payload
 
+    def test_graph_interrupt_workflow_confirmation(self):
+        """confirm_workflow payload (type=workflow_confirmation, no question)
+        is recognised — this is the regression that previously dropped
+        workflow confirmations because the check was `question in value`."""
+        payload = {
+            "type": "workflow_confirmation",
+            "workflow_name": "data-pull",
+            "workflow_description": "数据拉取",
+            "input_preview": {"source": "mysql"},
+        }
+        gi = _GraphInterruptError((_Interrupt(value=payload),))
+        assert _extract_interrupt(gi) == payload
+
     def test_graph_interrupt_without_question(self):
-        """Interrupt without question field → None (not an ask_clarification)."""
+        """Interrupt with neither question nor workflow_confirmation → None."""
         gi = _GraphInterruptError((_Interrupt(value={"error": "something"}),))
         assert _extract_interrupt(gi) is None
 
@@ -445,6 +459,40 @@ class TestExtractInterrupt:
 
     def test_none(self):
         assert _extract_interrupt(None) is None
+
+
+class TestBuildInterruptEvent:
+    """_build_interrupt_event dispatches on payload type to fill the right
+    InterruptEvent fields for the frontend card renderer."""
+
+    def test_workflow_confirmation_payload(self):
+        payload = {
+            "type": "workflow_confirmation",
+            "workflow_name": "data-pull",
+            "workflow_description": "数据拉取",
+            "input_preview": {"source": "mysql"},
+        }
+        evt = _build_interrupt_event(payload, interrupt_id="intr_1")
+        assert evt.kind == "workflow_confirmation"
+        assert evt.workflow_name == "data-pull"
+        assert evt.workflow_description == "数据拉取"
+        assert evt.input_preview == {"source": "mysql"}
+        assert evt.interrupt_id == "intr_1"
+        # clarification fields stay at defaults
+        assert evt.question == ""
+
+    def test_clarification_payload(self):
+        payload = {
+            "question": "which db?",
+            "type": "missing_info",
+            "options": ["mysql", "postgres"],
+        }
+        evt = _build_interrupt_event(payload)
+        assert evt.kind == "clarification"
+        assert evt.question == "which db?"
+        assert evt.options == ["mysql", "postgres"]
+        # workflow fields stay at defaults
+        assert evt.workflow_name == ""
 
 
 class TestExtractContent:

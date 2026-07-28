@@ -173,12 +173,12 @@ async def _build_workflow_tool_declaration(workflow_ids: list[str]) -> str:
         "",
         "When a workflow matches the user's request:",
         "",
-        "1. Call ``propose_workflow(workflow_name, params)`` — this shows a",
-        "   confirmation card to the user with workflow info and input params.",
-        "   After calling, just tell the user you found a suitable workflow.",
-        "   **Do NOT ask the user questions** — the card handles confirmation.",
+        "1. Call ``confirm_workflow(workflow_name, description, params)`` to",
+        "   show the user a confirmation card. Execution pauses until the user",
+        "   confirms or rejects. The tool returns the user's decision — do NOT",
+        "   add any follow-up text in the same turn, the card speaks for itself.",
         "",
-        "2. When the user confirms (e.g. says '确认', '好的'), call",
+        "2. When the user confirms (the tool returns a confirmation), call",
         "   ``dispatch_workflow(workflow_name, params)`` to create the Task.",
         "",
     ]
@@ -361,7 +361,7 @@ def _build_task_tool_declaration() -> str:
         "",
         "You have access to the following task management tools. Use them to query or manage workflow Tasks.",
         "",
-        "- **propose_workflow(workflow_name, params)**: Propose a workflow to the user. Returns structured info that shows a confirmation card. Does NOT create a Task — just tell the user you found a workflow after calling.",
+        "- **confirm_workflow(workflow_name, description, params)**: Ask the user to confirm executing a workflow. Execution pauses (a confirmation card is shown) and resumes when the user confirms or rejects. Pass the workflow's name and description (from the Workflow declaration above) plus the proposed input params.",
         "- **dispatch_workflow(workflow_name, params)**: Create and dispatch a workflow Task. Only call this AFTER the user explicitly confirms. Pass the user's original request as params using the exact variable names from the Workflow declaration above.",
         "- **task_query(task_ids)**: Query status/results of Tasks by their IDs. Returns status + output (completed) or error (failed). Only call this when the user asks about progress — do NOT poll or loop.",
         "- **task_intervene**: Intervene in a Task (approve, reject, cancel, resume, retry)",
@@ -493,7 +493,7 @@ def _make_skill_loader(allowed_names: set[str] | None = None) -> Callable:
 # Preview / Dry-run — inspect assembled prompt & tools without invoking LLM
 # ---------------------------------------------------------------------------
 
-_WORKFLOW_TOOL_NAMES = {"propose_workflow", "dispatch_workflow"}
+_WORKFLOW_TOOL_NAMES = {"confirm_workflow", "dispatch_workflow"}
 _TASK_TOOL_NAMES = {
     "task_query", "task_intervene",
     "cancel_task", "update_task_variables",

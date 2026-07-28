@@ -8,8 +8,8 @@ import pytest
 from app.engine.agent.workflow_executor import (
     _TASK_TOOLS,
     cancel_task,
+    confirm_workflow,
     dispatch_workflow,
-    propose_workflow,
     task_intervene,
     task_query,
     update_task_variables,
@@ -177,14 +177,14 @@ class TestToolList:
     """_TASK_TOOLS export list."""
 
     def test_tool_count(self):
-        """Should export 6 task management tools (propose_workflow + dispatch_workflow + 4)."""
+        """Should export 6 task management tools (confirm_workflow + dispatch_workflow + 4)."""
         assert len(_TASK_TOOLS) == 6
 
     def test_tool_names(self):
         """Should contain all expected tool names."""
         names = {t.name for t in _TASK_TOOLS}
         expected = {
-            "propose_workflow",
+            "confirm_workflow",
             "dispatch_workflow",
             "task_query",
             "task_intervene",
@@ -195,121 +195,94 @@ class TestToolList:
 
 
 # ---------------------------------------------------------------------------
-# propose_workflow — shows a confirmation card
+# confirm_workflow — interrupts to ask the user to confirm
 # ---------------------------------------------------------------------------
 
 
-class TestProposeWorkflow:
-    """propose_workflow tool — returns proposal info without creating a Task."""
+class TestConfirmWorkflow:
+    """confirm_workflow tool — calls interrupt() with the proposal payload and
+    returns the user's resume value. Does not look anything up in the DB
+    (the agent already knows the workflow name/description from the system
+    prompt)."""
 
     @pytest.mark.asyncio
-    async def test_propose_not_found(self):
-        """Should return error when workflow does not exist."""
-        with patch(
-            "app.services.workflow_registry_service.WorkflowRegistryService.get_by_name",
-            return_value=None,
-        ), patch(
-            "app.services.workflow_registry_service.WorkflowRegistryService.get_by_workflow_id",
-            return_value=None,
-        ):
-            result = await propose_workflow.ainvoke(
-                {"workflow_name": "nonexistent"}
+    async def test_confirm_returns_resume_value(self):
+        """Should interrupt and return the user's confirmation text."""
+        captured: dict = {}
+
+        def _fake_interrupt(payload):
+            captured["payload"] = payload
+            return "确认执行 data-pull"
+
+        with patch("langgraph.types.interrupt", side_effect=_fake_interrupt):
+            result = await confirm_workflow.ainvoke(
+                {
+                    "workflow_name": "data-pull",
+                    "description": "数据拉取工作流",
+                    "params": {"source": "mysql_db"},
+                }
             )
-            import json
-
-            data = json.loads(result)
-            assert "error" in data
+        assert result == "确认执行 data-pull"
+        # payload carries the workflow info for the frontend card
+        assert captured["payload"]["type"] == "workflow_confirmation"
+        assert captured["payload"]["workflow_name"] == "data-pull"
+        assert captured["payload"]["workflow_description"] == "数据拉取工作流"
+        assert captured["payload"]["input_preview"] == {"source": "mysql_db"}
 
     @pytest.mark.asyncio
-    async def test_propose_success(self):
-        """Should return proposal info with type field."""
-        fake_entry = {
-            "_id": "reg_001",
-            "name": "data-pull",
-            "description": "数据拉取工作流",
-            "has_human_node": True,
-        }
-        with patch(
-            "app.services.workflow_registry_service.WorkflowRegistryService.get_by_name",
-            return_value=fake_entry,
-        ):
-            result = await propose_workflow.ainvoke(
-                {"workflow_name": "data-pull", "params": {"source": "mysql_db"}}
+    async def test_confirm_no_params(self):
+        """Should produce an empty input_preview when params omitted."""
+        captured: dict = {}
+
+        def _fake_interrupt(payload):
+            captured["payload"] = payload
+            return "确认"
+
+        with patch("langgraph.types.interrupt", side_effect=_fake_interrupt):
+            result = await confirm_workflow.ainvoke(
+                {"workflow_name": "data-pull", "description": "数据拉取工作流"}
             )
-            import json
-
-            data = json.loads(result)
-            assert data["type"] == "workflow_proposal"
-            assert data["workflow_name"] == "data-pull"
-            assert data["workflow_description"] == "数据拉取工作流"
-            assert data["input_preview"] == {"source": "mysql_db"}
-            assert data["has_human_node"] is True
+        assert result == "确认"
+        assert captured["payload"]["input_preview"] == {}
 
     @pytest.mark.asyncio
-    async def test_propose_no_params(self):
-        """Should work without params."""
-        fake_entry = {
-            "_id": "reg_001",
-            "name": "data-pull",
-            "description": "数据拉取工作流",
-            "has_human_node": False,
-        }
-        with patch(
-            "app.services.workflow_registry_service.WorkflowRegistryService.get_by_name",
-            return_value=fake_entry,
-        ):
-            result = await propose_workflow.ainvoke(
-                {"workflow_name": "data-pull"}
-            )
-            import json
-
-            data = json.loads(result)
-            assert data["type"] == "workflow_proposal"
-            assert data["input_preview"] == {}
-
-    @pytest.mark.asyncio
-    async def test_propose_params_as_json_string(self):
+    async def test_confirm_params_as_json_string(self):
         """LLM 有时会把 params 作为 JSON 字符串传入，应自动解析。"""
-        fake_entry = {
-            "_id": "reg_002",
-            "name": "ui-designer",
-            "description": "UI 设计工作流",
-            "has_human_node": False,
-        }
-        with patch(
-            "app.services.workflow_registry_service.WorkflowRegistryService.get_by_name",
-            return_value=fake_entry,
-        ):
-            result = await propose_workflow.ainvoke({
+        captured: dict = {}
+
+        def _fake_interrupt(payload):
+            captured["payload"] = payload
+            return "确认执行"
+
+        with patch("langgraph.types.interrupt", side_effect=_fake_interrupt):
+            await confirm_workflow.ainvoke({
                 "workflow_name": "ui-designer",
+                "description": "UI 设计工作流",
                 "params": '{"input": "设计一个现代简约的个人博客主题"}',
             })
-            import json
-            data = json.loads(result)
-            assert data["type"] == "workflow_proposal"
-            assert data["input_preview"] == {"input": "设计一个现代简约的个人博客主题"}
+        assert captured["payload"]["input_preview"] == {
+            "input": "设计一个现代简约的个人博客主题"
+        }
 
     @pytest.mark.asyncio
-    async def test_propose_params_invalid_json_string(self):
-        """非法 JSON 字符串应报 ValidationError，不应被吞掉。"""
-        from pydantic import ValidationError
-        fake_entry = {
-            "_id": "reg_003",
-            "name": "ui-designer",
-            "description": "UI 设计工作流",
-            "has_human_node": False,
-        }
-        with (
-            patch(
-                "app.services.workflow_registry_service.WorkflowRegistryService.get_by_name",
-                return_value=fake_entry,
-            ),
-            pytest.raises(ValidationError),
-        ):
-            await propose_workflow.ainvoke({
-                "workflow_name": "ui-designer",
-                "params": "{not valid json}",
-            })
+    async def test_confirm_rejection_returns_rejection(self):
+        """When the user rejects, the resume value is returned as-is so the
+        LLM knows not to dispatch."""
+        with patch("langgraph.types.interrupt", return_value="取消"):
+            result = await confirm_workflow.ainvoke(
+                {"workflow_name": "data-pull", "description": "数据拉取工作流"}
+            )
+        assert result == "取消"
+
+    @pytest.mark.asyncio
+    async def test_confirm_non_string_resume_coerced(self):
+        """A non-string resume value is coerced to str (defensive)."""
+        with patch("langgraph.types.interrupt", return_value=True):
+            result = await confirm_workflow.ainvoke(
+                {"workflow_name": "data-pull", "description": "数据拉取工作流"}
+            )
+        assert result == "True"
+
 
 
 # ---------------------------------------------------------------------------
